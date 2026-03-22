@@ -1,2 +1,4 @@
 /测试沙箱/
 /private/
+__pycache__/
+*.pyc
