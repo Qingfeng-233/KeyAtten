@@ -1,45 +1,47 @@
 # KeyAtten
 
-基于 Transformer Attention 机制的关键词提取框架。零训练、零标注，仅需一次前向推理，支持中英双语。
+[English](README.md) | [中文](README.zh-CN.md)
 
-在 7 个公开数据集、14 种方法的对比评测中，中文新闻场景 F1@10 较传统基线提升 67%，英文长文场景较外部最强方法提升约 78%。
+Attention-based keyword extraction framework. Zero training, zero labeling, single forward pass. Supports Chinese and English.
 
-## 特性
+Evaluated on 7 public datasets against 14 methods: +67% F1@10 over traditional baselines on Chinese news, +78% over the strongest external method on English long documents.
 
-- 直接利用预训练模型的注意力权重提取关键词，无需额外训练或标注
-- 提供 Attention-IDF 混合策略，在长文和有语料库的场景下效果显著
-- 支持词级语义权重输出（含权重值、位置索引、词性标注）
-- 支持单层或多层 Attention 加权融合
-- 仅需 22M–33M 参数的小模型，单次前向推理完成
+## Features
 
-## 安装
+- Extracts keywords directly from pretrained model attention weights — no fine-tuning or labeling required
+- Attention-IDF hybrid strategy for significant gains on long documents and corpus-aware scenarios
+- Word-level semantic weight output (weight value, position index, POS tag)
+- Single-layer or multi-layer attention weighted fusion
+- Lightweight: 22M–33M parameter models, single forward pass
+
+## Installation
 
 ```bash
 pip install .
 ```
 
-依赖：`torch>=2.0` `transformers>=4.30` `jieba` `scikit-learn` `nltk` `numpy`
+Dependencies: `torch>=2.0` `transformers>=4.30` `jieba` `scikit-learn` `nltk` `numpy`
 
-## 快速开始
+## Quick Start
 
-### 关键词提取
+### Keyword Extraction
 
 ```python
 from keyatten import KeyAttenExtractor
 
 ext = KeyAttenExtractor(model="thenlper/gte-small-zh", language="zh")
 
-# 纯 Attention
+# Pure attention
 keywords = ext.extract_keywords(
     "自然语言处理是人工智能的重要方向",
     method="cls_attn",
 )
 ```
 
-### Attention-IDF 混合
+### Attention-IDF Hybrid
 
 ```python
-# 先从语料库拟合 IDF
+# Fit IDF from a corpus first
 idf = ext.fit_idf(["自然语言处理是人工智能的重要方向", "关键词提取是文本挖掘任务"])
 
 keywords = ext.extract_keywords(
@@ -49,7 +51,7 @@ keywords = ext.extract_keywords(
 )
 ```
 
-### 词级权重
+### Word-Level Weights
 
 ```python
 weights = ext.extract_word_weights(
@@ -60,7 +62,7 @@ for w in weights:
     print(w.word, w.weight, w.pos_tag)
 ```
 
-### 批量提取
+### Batch Extraction
 
 ```python
 results = ext.extract_keywords_batch(
@@ -69,7 +71,7 @@ results = ext.extract_keywords_batch(
 )
 ```
 
-### 便捷函数
+### Convenience Function
 
 ```python
 from keyatten import extract_keywords
@@ -80,60 +82,58 @@ keywords = extract_keywords(
 )
 ```
 
-## 提取方法
+## Methods
 
-| 方法 | 说明 |
-|------|------|
-| `cls_attn` | [CLS] token 对各 token 的注意力权重 |
-| `received_attn` | 各 token 从所有 token 接收的注意力总和 |
-| `samrank` | SAMRank 排序公式（全局注意力 + 比例分配） |
-| `fusion_attn` | CLS 注意力与 received 注意力的归一化融合 |
+| Method | Description |
+|--------|-------------|
+| `cls_attn` | Attention weights from [CLS] token to each token |
+| `received_attn` | Total attention each token receives from all tokens |
+| `samrank` | SAMRank formula (global attention + proportional redistribution) |
+| `fusion_attn` | Normalized product of CLS and received attention |
 
-以上每种方法均有对应的 `_idf` 混合变体（如 `cls_attn_idf`），将 Attention 分数与 TF-IDF 相乘，适合有语料库的场景。
+Each method has a corresponding `_idf` hybrid variant (e.g., `cls_attn_idf`) that multiplies attention scores with TF-IDF, suitable for corpus-aware scenarios.
 
-> `samrank` 的排序公式引用自 [Kang & Shin (2023, EMNLP)](https://doi.org/10.18653/v1/2023.emnlp-main.630)，其余方法及所有 `_idf` 混合策略为本项目原创。
+> The `samrank` formula is referenced from [Kang & Shin (2023, EMNLP)](https://doi.org/10.18653/v1/2023.emnlp-main.630). The other methods (`cls_attn`, `received_attn`, `fusion_attn`) and all `_idf` hybrid strategies are original to this project.
 
-### 如何选择方法
+### Choosing a Method
 
-`samrank` 系列在 Benchmark 上跑分最高（F1@10），因为它覆盖面广、recall 强。但在实际应用中，`cls_attn` 往往更实用——它提取的是最具辨识度的核心词，一眼就能看出文章在讲什么。
+`samrank` achieves the highest benchmark scores (F1@10) due to broader coverage and stronger recall. In practice, `cls_attn` is often more useful — it extracts the most distinctive core terms, making it ideal for tag clouds and summaries.
 
-简单来说：需要跑分选 `samrank`，需要实战选 `cls_attn`。
+## Practical Examples
 
-## 实战示例
+Side-by-side comparison of `cls_attn` vs `samrank` across domains (model: `gte-small-zh`, top_k=6):
 
-以下为 `cls_attn` 与 `samrank` 在不同领域文本上的提取对比（模型：`gte-small-zh`，top_k=6）：
+| Domain | Input (excerpt) | cls_attn | samrank |
+|--------|----------------|----------|---------|
+| Tech | OpenAI released GPT-4o with multimodal input... | OpenAI, GPT, model | OpenAI, model, GPT |
+| Medical | mRNA vaccine encodes spike protein... Omicron variant... | mRNA, mRNA vaccine, COVID, **Omicron variant** | mRNA, mRNA vaccine, COVID, COVID virus |
+| Finance | Fed announces 25bp rate hike... | rate hike, basis points, **global stocks**, rate | rate hike, basis points, rate, global stocks |
+| Sports | Messi scores hat-trick in World Cup final... lifts trophy | **Messi**, trophy, hat-trick, **final** | trophy, Messi, hat-trick, **penalty** |
+| History | Qin Shi Huang unified six states... centralized dynasty | centralization, feudal dynasty, standardization | centralization, standardization, feudal dynasty |
+| Daily | Meet at Starbucks at 3pm... business trip to Beijing | **Starbucks**, Beijing, business trip | **meet**, Beijing, **chat** |
 
-| 领域 | 输入文本（节选） | cls_attn | samrank |
-|------|-----------------|----------|---------|
-| 科技 | OpenAI发布了GPT-4o模型，支持多模态输入... | OpenAI, GPT, 模型 | OpenAI, 模型, GPT |
-| 医学 | mRNA疫苗通过编码刺突蛋白...对新冠病毒Omicron变异株... | mRNA, mRNA疫苗, 新冠, **Omicron变异** | mRNA, mRNA疫苗, 新冠, 新冠病毒 |
-| 金融 | 美联储宣布加息25个基点... | 加息, 基点, **全球股市**, 基金利率 | 加息, 基点, 利率, 全球股市 |
-| 体育 | 梅西在世界杯决赛中上演帽子戏法...捧起大力神杯 | **梅西**, 大力神杯, 帽子戏法, **决赛** | 大力神杯, 梅西, 帽子戏法, **点球** |
-| 历史 | 秦始皇统一六国...建立中央集权的封建王朝 | 中央集权, 封建王朝, 车同轨, 六国 | 中央集权, 车同轨, 书同文, 封建王朝 |
-| 日常 | 今天下午在星巴克见面...去北京出差 | **星巴克**, 北京, 北京出差 | **见面**, 北京, **聊聊** |
+`cls_attn` favors the most distinctive entities (Messi, Starbucks, Omicron), ideal for tag clouds and summary displays. `samrank` provides broader coverage, better suited for retrieval and evaluation scenarios.
 
-`cls_attn` 倾向于抓最具辨识度的实体（梅西、星巴克、Omicron），适合标签云、摘要展示等需要一眼抓住主题的场景；`samrank` 覆盖面更广，适合需要全面召回的检索和评测场景。
+## Recommended Models
 
-## 推荐模型
+| Language | Model | Parameters |
+|----------|-------|------------|
+| Chinese | `thenlper/gte-small-zh` | ~33M |
+| English | `sentence-transformers/all-MiniLM-L6-v2` | ~22M |
 
-| 语言 | 模型 | 参数量 |
-|------|------|--------|
-| 中文 | `thenlper/gte-small-zh` | ~33M |
-| 英文 | `sentence-transformers/all-MiniLM-L6-v2` | ~22M |
+## Evaluation Summary
 
-## 评测摘要
+Compared against TF-IDF, TextRank, KeyBERT and 14 methods total on 7 public datasets (F1@10):
 
-在 7 个公开数据集上与 TF-IDF、TextRank、KeyBERT 等 14 种方法对比，指标为 F1@10：
+| Scenario | KeyAtten Best | vs Strongest Traditional | vs Strongest External |
+|----------|:---:|:---:|:---:|
+| Chinese News (ShenCeCup) | **0.2579** | +67% | — |
+| Chinese Academic (CSL) | **0.2106** | +9% | — |
+| English Long-doc (SemEval2010-fulltext) | **0.1344** | — | +78% |
+| English Long-doc (Krapivin2009-fulltext) | **0.1268** | — | +79% |
+| English Short-doc (3 datasets) | 0.1370 | — | On par |
 
-| 场景 | KeyAtten 最优 | vs 最强传统基线 | vs 最强外部方法 |
-|------|:---:|:---:|:---:|
-| 中文新闻（ShenCeCup） | **0.2579** | +67% | — |
-| 中文学术摘要（CSL） | **0.2106** | +9% | — |
-| 英文长文（SemEval2010-fulltext） | **0.1344** | — | +78% |
-| 英文长文（Krapivin2009-fulltext） | **0.1268** | — | +79% |
-| 英文短文（3 个数据集） | 0.1370 | — | 持平 |
-
-完整评测报告见 [EVALUATION-PUBLIC.md](./EVALUATION-PUBLIC.md)。
+Full evaluation report: [EVALUATION-PUBLIC.md](./EVALUATION-PUBLIC.md)
 
 ## API
 
@@ -141,32 +141,34 @@ keywords = extract_keywords(
 
 ```python
 KeyAttenExtractor(
-    model: str,                         # Hugging Face 模型名称
-    language: str = "zh",               # "zh" 或 "en"
-    device: str = "cpu",                # 计算设备
-    layer_index: int = -1,              # 单层索引（-1 = 最后一层）
-    layer_indices: list[int] = None,    # 多层索引列表
-    layer_weights: list[float] = None,  # 多层权重列表
+    model: str,                         # Hugging Face model name
+    language: str = "zh",               # "zh" or "en"
+    device: str = "cpu",                # compute device
+    layer_index: int = -1,              # single layer index (-1 = last layer)
+    layer_indices: list[int] = None,    # multi-layer indices
+    layer_weights: list[float] = None,  # multi-layer weights
+    attn_merge: bool = False,           # attention-guided char merging for Chinese
+    merge_threshold: float = 0.3,       # merge threshold (0.0–1.0)
 )
 ```
 
-| 方法 | 返回值 |
-|------|--------|
+| Method | Returns |
+|--------|---------|
 | `extract_keywords(text, method, top_k, idf_lookup)` | `list[str]` |
 | `extract_keywords_batch(texts, method, top_k, idf_lookup)` | `list[list[str]]` |
 | `extract_word_weights(text, method)` | `list[WordWeight]` |
 | `fit_idf(texts)` | `dict[str, float]` |
 
-`WordWeight` 包含字段：`word`、`index`、`weight`、`pos_tag`。
+`WordWeight` fields: `word`, `index`, `weight`, `pos_tag`.
 
-## 引用
+## Citation
 
-本项目的 `samrank` 方法引用了以下论文的排序公式：
+The `samrank` method in this project references the ranking formula from:
 
 > Kang, B., & Shin, H. (2023). *SAMRank: Unsupervised Keyphrase Extraction using Self-Attention Map in BERT and GPT-2.* EMNLP 2023. [DOI: 10.18653/v1/2023.emnlp-main.630](https://doi.org/10.18653/v1/2023.emnlp-main.630)
 
-`cls_attn`、`received_attn`、`fusion_attn` 及所有 `_idf` 混合策略为本项目原创。
+`cls_attn`, `received_attn`, `fusion_attn` and all `_idf` hybrid strategies are original to this project.
 
-## 许可证
+## License
 
 [MIT](./LICENSE)
