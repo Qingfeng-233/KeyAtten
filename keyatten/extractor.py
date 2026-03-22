@@ -4,8 +4,22 @@ from typing import Sequence
 
 import numpy as np
 
-from .attention import ATTENTION_METHODS, attention_word_scores, batched_attention_word_scores, build_model_bundle
-from .candidates import Candidate, WordWeight, build_candidates, candidate_rank_from_word_scores, segment_text
+from .attention import (
+    ATTENTION_METHODS,
+    attention_word_scores,
+    attention_word_scores_with_raw,
+    batched_attention_word_scores,
+    build_model_bundle,
+    rescore_with_new_words,
+)
+from .candidates import (
+    Candidate,
+    WordWeight,
+    build_candidates,
+    candidate_rank_from_word_scores,
+    merge_single_chars,
+    segment_text,
+)
 from .hybrid import combine_word_scores, inverse_document_frequency, token_counter, word_scores_from_token_values
 
 
@@ -22,6 +36,8 @@ class KeyAttenExtractor:
         layer_index: int = -1,
         layer_indices: list[int] | None = None,
         layer_weights: list[float] | None = None,
+        attn_merge: bool = False,
+        merge_threshold: float = 0.3,
     ) -> None:
         if not model:
             raise ValueError("model is required.")
@@ -41,6 +57,8 @@ class KeyAttenExtractor:
         self.layer_index = layer_index
         self.layer_indices = list(layer_indices) if layer_indices is not None else None
         self.layer_weights = list(layer_weights) if layer_weights is not None else None
+        self.attn_merge = attn_merge
+        self.merge_threshold = merge_threshold
         self.model_bundle = build_model_bundle(model, device)
         self.idf_lookup: dict[str, float] | None = None
 
@@ -51,6 +69,11 @@ class KeyAttenExtractor:
         top_k: int = 10,
         idf_lookup: dict[str, float] | None = None,
     ) -> list[str]:
+        self._validate_method(method, allow_hybrid=True)
+
+        if self.attn_merge and self.language.startswith("zh"):
+            return self._extract_keywords_with_merge(text, method, top_k, idf_lookup)
+
         words, pos_tags, candidates, candidate_starts, candidate_ends, token_counts = self._prepare_document(text)
         if not candidates:
             return []
@@ -72,6 +95,65 @@ class KeyAttenExtractor:
             candidate_ends=candidate_ends,
         )
 
+    def _extract_keywords_with_merge(
+        self,
+        text: str,
+        method: str,
+        top_k: int,
+        idf_lookup: dict[str, float] | None,
+    ) -> list[str]:
+        # Step 1: coarse segmentation
+        words, pos_tags = segment_text(text, language=self.language)
+
+        # Step 2: forward pass — get word scores + raw attention map
+        scores_by_method, attn_map, word_ids = attention_word_scores_with_raw(
+            words,
+            self.model_bundle,
+            layer_index=self.layer_index,
+            layer_indices=self.layer_indices,
+            layer_weights=self.layer_weights,
+        )
+
+        # Step 3: merge single chars using attention
+        merged_words, merged_pos, merge_map, changed = merge_single_chars(
+            list(words), list(pos_tags), attn_map, list(word_ids), self.merge_threshold,
+        )
+
+        # Step 4: rescore if merging happened
+        if changed:
+            base_method = method.removesuffix("_idf")
+            rescored = rescore_with_new_words(attn_map, list(word_ids), words, merged_words, merge_map)
+            word_scores = rescored[base_method]
+        else:
+            base_method = method.removesuffix("_idf")
+            word_scores = scores_by_method[base_method]
+            merged_words = list(words)
+            merged_pos = list(pos_tags)
+
+        # Step 5: IDF hybrid if needed
+        token_counts = dict(token_counter(merged_words, merged_pos, language=self.language))
+        if method.endswith("_idf"):
+            lookup = self._require_idf_lookup(idf_lookup)
+            tfidf_word_scores = self._tfidf_word_scores(merged_words, merged_pos, token_counts, lookup)
+            word_scores = combine_word_scores(word_scores, tfidf_word_scores, mode="product")
+
+        # Step 6: build candidates and rank
+        candidates = build_candidates(merged_words, merged_pos, language=self.language)
+        if not candidates:
+            return []
+        candidate_starts = np.fromiter((c.word_start for c in candidates), dtype=np.int32, count=len(candidates))
+        candidate_ends = np.fromiter((c.word_end for c in candidates), dtype=np.int32, count=len(candidates))
+
+        return candidate_rank_from_word_scores(
+            candidates,
+            word_scores,
+            top_k=top_k,
+            token_counts=token_counts,
+            words=merged_words,
+            candidate_starts=candidate_starts,
+            candidate_ends=candidate_ends,
+        )
+
     def extract_word_weights(
         self,
         text: str,
@@ -79,14 +161,34 @@ class KeyAttenExtractor:
     ) -> list[WordWeight]:
         self._validate_method(method, allow_hybrid=False)
         words, pos_tags = segment_text(text, language=self.language)
-        scores_by_method = attention_word_scores(
-            words,
-            self.model_bundle,
-            layer_index=self.layer_index,
-            layer_indices=self.layer_indices,
-            layer_weights=self.layer_weights,
-        )
-        word_scores = scores_by_method[method]
+
+        if self.attn_merge and self.language.startswith("zh"):
+            scores_by_method, attn_map, word_ids = attention_word_scores_with_raw(
+                words,
+                self.model_bundle,
+                layer_index=self.layer_index,
+                layer_indices=self.layer_indices,
+                layer_weights=self.layer_weights,
+            )
+            merged_words, merged_pos, merge_map, changed = merge_single_chars(
+                list(words), list(pos_tags), attn_map, list(word_ids), self.merge_threshold,
+            )
+            if changed:
+                rescored = rescore_with_new_words(attn_map, list(word_ids), words, merged_words, merge_map)
+                word_scores = rescored[method]
+                words, pos_tags = merged_words, merged_pos
+            else:
+                word_scores = scores_by_method[method]
+        else:
+            scores_by_method = attention_word_scores(
+                words,
+                self.model_bundle,
+                layer_index=self.layer_index,
+                layer_indices=self.layer_indices,
+                layer_weights=self.layer_weights,
+            )
+            word_scores = scores_by_method[method]
+
         return [
             WordWeight(
                 word=word,
@@ -115,6 +217,10 @@ class KeyAttenExtractor:
         self._validate_method(method, allow_hybrid=True)
         if not texts:
             return []
+
+        # attn_merge: fall back to per-document extraction (no batch optimization)
+        if self.attn_merge and self.language.startswith("zh"):
+            return [self.extract_keywords(text, method, top_k, idf_lookup) for text in texts]
 
         prepared = [self._prepare_document(text) for text in texts]
         batch_words = [item[0] for item in prepared]

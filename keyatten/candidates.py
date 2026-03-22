@@ -237,6 +237,106 @@ def candidate_rank_from_word_scores(
     return rank_candidates_from_scores(candidates, candidate_scores, top_k=top_k)
 
 
+def merge_single_chars(
+    words: list[str],
+    pos_tags: list[str],
+    attention_map: np.ndarray,
+    word_ids: list[int | None],
+    merge_threshold: float = 0.3,
+) -> tuple[list[str], list[str], list[list[int]], bool]:
+    """Merge consecutive single-character tokens guided by attention scores.
+
+    Returns:
+        (merged_words, merged_pos_tags, merge_map, changed)
+        - merge_map[new_idx] = [old_idx_1, ...] for rescore_with_new_words
+        - changed: True if any merging occurred
+    """
+    seq_len = attention_map.shape[0]
+
+    # Precompute adjacency scores between consecutive tokens in model space
+    adj_raw = np.zeros(seq_len, dtype=np.float32)
+    for i in range(seq_len - 1):
+        adj_raw[i] = (attention_map[i, i + 1] + attention_map[i + 1, i]) / 2.0
+    min_a, max_a = float(adj_raw.min()), float(adj_raw.max())
+    if max_a > min_a:
+        adj_norm = (adj_raw - min_a) / (max_a - min_a)
+    else:
+        adj_norm = np.zeros_like(adj_raw)
+
+    # Build word_id -> token indices mapping
+    word_to_tokens: dict[int, list[int]] = {}
+    for tok_idx, wid in enumerate(word_ids):
+        if wid is not None and 0 <= wid < len(words):
+            word_to_tokens.setdefault(wid, []).append(tok_idx)
+
+    # Find merge score between adjacent words using their boundary tokens
+    def _word_adjacency_score(w1: int, w2: int) -> float:
+        toks1 = word_to_tokens.get(w1, [])
+        toks2 = word_to_tokens.get(w2, [])
+        if not toks1 or not toks2:
+            return 0.0
+        last_tok = toks1[-1]
+        if last_tok < seq_len:
+            return float(adj_norm[last_tok])
+        return 0.0
+
+    merged_words: list[str] = []
+    merged_pos: list[str] = []
+    merge_map: list[list[int]] = []
+    changed = False
+
+    i = 0
+    while i < len(words):
+        word = words[i]
+
+        # Skip non-single-char or punctuation
+        if len(word) != 1 or PUNCT_RE.match(word):
+            merged_words.append(word)
+            merged_pos.append(pos_tags[i])
+            merge_map.append([i])
+            i += 1
+            continue
+
+        # Collect consecutive single-char non-punctuation sequence
+        single_start = i
+        while i + 1 < len(words) and len(words[i + 1]) == 1 and not PUNCT_RE.match(words[i + 1]):
+            i += 1
+
+        if i == single_start:
+            # Only one single char, keep as is
+            merged_words.append(word)
+            merged_pos.append(pos_tags[single_start])
+            merge_map.append([single_start])
+            i += 1
+            continue
+
+        # Multiple consecutive single chars: merge based on attention
+        group = words[single_start]
+        group_indices = [single_start]
+        for j in range(single_start, i):
+            score = _word_adjacency_score(j, j + 1)
+            if score >= merge_threshold:
+                group += words[j + 1]
+                group_indices.append(j + 1)
+            else:
+                merged_words.append(group)
+                merged_pos.append("nz" if len(group) > 1 else pos_tags[group_indices[0]])
+                if len(group) > 1:
+                    changed = True
+                merge_map.append(group_indices)
+                group = words[j + 1]
+                group_indices = [j + 1]
+
+        merged_words.append(group)
+        merged_pos.append("nz" if len(group) > 1 else pos_tags[group_indices[0]])
+        if len(group) > 1:
+            changed = True
+        merge_map.append(group_indices)
+        i += 1
+
+    return merged_words, merged_pos, merge_map, changed
+
+
 __all__ = [
     "Candidate",
     "WordWeight",
@@ -250,4 +350,5 @@ __all__ = [
     "candidate_score_values",
     "rank_candidates_from_scores",
     "candidate_rank_from_word_scores",
+    "merge_single_chars",
 ]

@@ -170,9 +170,97 @@ def attention_word_scores(
     return _aggregate_layer_word_scores(per_layer_scores, layer_weights=layer_weights)
 
 
+def attention_word_scores_with_raw(
+    words: Sequence[str],
+    model_bundle: dict,
+    layer_index: int = -1,
+    layer_indices: Sequence[int] | None = None,
+    layer_weights: Sequence[float] | None = None,
+) -> tuple[dict[str, np.ndarray], np.ndarray, list[int | None]]:
+    """Like attention_word_scores but also returns the token-level attention map and word_ids.
+
+    Returns:
+        (scores_by_method, attention_map, word_ids)
+        - scores_by_method: same as attention_word_scores
+        - attention_map: (valid_tokens, valid_tokens) averaged over heads
+        - word_ids: token-to-word mapping from the tokenizer
+    """
+    effective_layer_indices = list(layer_indices) if layer_indices else [layer_index]
+
+    tokenizer = model_bundle["tokenizer"]
+    model = model_bundle["model"]
+    device = model_bundle["device"]
+
+    encoded = tokenizer(
+        [list(words)],
+        is_split_into_words=True,
+        padding=False,
+        truncation=True,
+        max_length=512,
+        return_tensors="pt",
+    )
+    word_ids = encoded.word_ids(batch_index=0)
+    encoded = {key: value.to(device) for key, value in encoded.items()}
+
+    with torch.no_grad():
+        outputs = model(**encoded, output_attentions=True)
+
+    layer_count = len(outputs.attentions)
+    valid_token_count = int(encoded["attention_mask"][0].sum().item())
+    valid_word_ids = word_ids[:valid_token_count]
+
+    # Use last effective layer for the raw attention map
+    resolved_last = _resolve_layer_index(effective_layer_indices[-1], layer_count)
+    raw_attention_map = outputs.attentions[resolved_last].mean(dim=1)[0][:valid_token_count, :valid_token_count].detach().cpu().numpy()
+
+    # Compute word scores per layer and aggregate
+    per_layer_scores = []
+    for li in effective_layer_indices:
+        resolved = _resolve_layer_index(li, layer_count)
+        attn_map = outputs.attentions[resolved].mean(dim=1)[0][:valid_token_count, :valid_token_count].detach().cpu().numpy()
+        per_layer_scores.append(_scores_from_attention_map(valid_word_ids, attn_map, len(words)))
+
+    scores_by_method = _aggregate_layer_word_scores(per_layer_scores, layer_weights=layer_weights)
+    return scores_by_method, raw_attention_map, valid_word_ids
+
+
+def rescore_with_new_words(
+    attention_map: np.ndarray,
+    old_word_ids: list[int | None],
+    old_words: Sequence[str],
+    new_words: Sequence[str],
+    merge_map: list[list[int]],
+) -> dict[str, np.ndarray]:
+    """Recompute word scores using a new word boundary mapping without re-running the model.
+
+    Args:
+        attention_map: (valid_tokens, valid_tokens) from the original forward pass
+        old_word_ids: token-to-old-word mapping
+        old_words: original word list
+        new_words: merged word list
+        merge_map: merge_map[new_idx] = [old_idx_1, old_idx_2, ...] mapping new words to old word indices
+    """
+    # Build new word_ids: remap old word indices to new word indices
+    old_to_new = {}
+    for new_idx, old_indices in enumerate(merge_map):
+        for old_idx in old_indices:
+            old_to_new[old_idx] = new_idx
+
+    new_word_ids = []
+    for wid in old_word_ids:
+        if wid is None or wid not in old_to_new:
+            new_word_ids.append(None)
+        else:
+            new_word_ids.append(old_to_new[wid])
+
+    return _scores_from_attention_map(new_word_ids, attention_map, len(new_words))
+
+
 __all__ = [
     "ATTENTION_METHODS",
     "normalize_array",
     "attention_word_scores",
+    "attention_word_scores_with_raw",
+    "rescore_with_new_words",
     "batched_attention_word_scores",
 ]
