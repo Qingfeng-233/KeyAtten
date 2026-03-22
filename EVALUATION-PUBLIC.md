@@ -9,7 +9,7 @@
 
 本项目构建了一个覆盖中英双语、短文与长文、Encoder 与 Decoder-only 架构的 Attention-based 关键词提取统一评测框架，在 7 个公开数据集上对 14 种方法进行了系统对比。
 
-KeyAtten 提供 4 种纯 Attention 方法（`cls_attn`、`received_attn`、`samrank`、`fusion_attn`）及其 IDF 混合变体。其中 SAMRank 排序公式源自 [Kang & Shin (2023, EMNLP)](https://doi.org/10.18653/v1/2023.emnlp-main.630)，本项目为独立实现的变种（多头平均 + IDF 混合）。
+KeyAtten 提供 4 种纯 Attention 方法（`cls_attn`、`received_attn`、`samrank`、`fusion_attn`）及其 IDF 混合变体。其中 `samrank` 的排序公式引用自 [Kang & Shin (2023, EMNLP)](https://doi.org/10.18653/v1/2023.emnlp-main.630)，其余方法（`cls_attn`、`received_attn`、`fusion_attn`）及所有 `_idf` 混合策略为本项目原创。
 
 ### 核心发现
 
@@ -197,9 +197,11 @@ Attention 关键词提取已验证可在 Decoder-only 长上下文 Transformer �
 
 ## 引用
 
-SAMRank 排序公式源自以下论文，本项目的 `samrank` 方法为独立实现的变种：
+本项目的 `samrank` 方法引用了以下论文的排序公式：
 
 > Kang, B., & Shin, H. (2023). *SAMRank: Unsupervised Keyphrase Extraction using Self-Attention Map in BERT and GPT-2.* Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing (EMNLP). DOI: 10.18653/v1/2023.emnlp-main.630
+
+`cls_attn`、`received_attn`、`fusion_attn` 及所有 `_idf` 混合策略为本项目原创。
 
 ---
 

@@ -91,7 +91,7 @@ keywords = extract_keywords(
 
 以上每种方法均有对应的 `_idf` 混合变体（如 `cls_attn_idf`），将 Attention 分数与 TF-IDF 相乘，适合有语料库的场景。
 
-> SAMRank 排序公式源自 Kang & Shin (2023, EMNLP)，本项目为独立实现的变种（多头平均 + IDF 混合），引用时请注明原始出处。
+> `samrank` 的排序公式引用自 [Kang & Shin (2023, EMNLP)](https://doi.org/10.18653/v1/2023.emnlp-main.630)，其余方法及所有 `_idf` 混合策略为本项目原创。
 
 ### 如何选择方法
 
