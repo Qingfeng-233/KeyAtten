@@ -1,0 +1,262 @@
+from __future__ import annotations
+
+from typing import Sequence
+
+import numpy as np
+
+from .attention import ATTENTION_METHODS, attention_word_scores, batched_attention_word_scores, build_model_bundle
+from .candidates import Candidate, WordWeight, build_candidates, candidate_rank_from_word_scores, segment_text
+from .hybrid import combine_word_scores, inverse_document_frequency, token_counter, word_scores_from_token_values
+
+
+HYBRID_METHODS = tuple(f"{method_name}_idf" for method_name in ATTENTION_METHODS)
+ALL_METHODS = ATTENTION_METHODS + HYBRID_METHODS
+
+
+class KeyAttenExtractor:
+    def __init__(
+        self,
+        model: str,
+        language: str = "zh",
+        device: str = "cpu",
+        layer_index: int = -1,
+        layer_indices: list[int] | None = None,
+        layer_weights: list[float] | None = None,
+    ) -> None:
+        if not model:
+            raise ValueError("model is required.")
+        if language not in {"zh", "en"}:
+            raise ValueError("language must be 'zh' or 'en'.")
+        if layer_indices is not None and not layer_indices:
+            raise ValueError("layer_indices must not be empty.")
+        if layer_weights is not None:
+            if layer_indices is None:
+                raise ValueError("layer_weights requires layer_indices.")
+            if len(layer_weights) != len(layer_indices):
+                raise ValueError("layer_weights must have the same length as layer_indices.")
+
+        self.model = model
+        self.language = language
+        self.device = device
+        self.layer_index = layer_index
+        self.layer_indices = list(layer_indices) if layer_indices is not None else None
+        self.layer_weights = list(layer_weights) if layer_weights is not None else None
+        self.model_bundle = build_model_bundle(model, device)
+        self.idf_lookup: dict[str, float] | None = None
+
+    def extract_keywords(
+        self,
+        text: str,
+        method: str = "cls_attn",
+        top_k: int = 10,
+        idf_lookup: dict[str, float] | None = None,
+    ) -> list[str]:
+        words, pos_tags, candidates, candidate_starts, candidate_ends, token_counts = self._prepare_document(text)
+        if not candidates:
+            return []
+
+        word_scores = self._resolve_word_scores(
+            words=words,
+            pos_tags=pos_tags,
+            method=method,
+            token_counts=token_counts,
+            idf_lookup=idf_lookup,
+        )
+        return candidate_rank_from_word_scores(
+            candidates,
+            word_scores,
+            top_k=top_k,
+            token_counts=token_counts,
+            words=words,
+            candidate_starts=candidate_starts,
+            candidate_ends=candidate_ends,
+        )
+
+    def extract_word_weights(
+        self,
+        text: str,
+        method: str = "received_attn",
+    ) -> list[WordWeight]:
+        self._validate_method(method, allow_hybrid=False)
+        words, pos_tags = segment_text(text, language=self.language)
+        scores_by_method = attention_word_scores(
+            words,
+            self.model_bundle,
+            layer_index=self.layer_index,
+            layer_indices=self.layer_indices,
+            layer_weights=self.layer_weights,
+        )
+        word_scores = scores_by_method[method]
+        return [
+            WordWeight(
+                word=word,
+                index=index,
+                weight=float(word_scores[index]),
+                pos_tag=pos_tags[index],
+            )
+            for index, word in enumerate(words)
+        ]
+
+    def fit_idf(self, texts: list[str]) -> dict[str, float]:
+        token_sets = []
+        for text in texts:
+            words, pos_tags = segment_text(text, language=self.language)
+            token_sets.append(token_counter(words, pos_tags, language=self.language).keys())
+        self.idf_lookup = inverse_document_frequency(token_sets)
+        return dict(self.idf_lookup)
+
+    def extract_keywords_batch(
+        self,
+        texts: list[str],
+        method: str = "cls_attn",
+        top_k: int = 10,
+        idf_lookup: dict[str, float] | None = None,
+    ) -> list[list[str]]:
+        self._validate_method(method, allow_hybrid=True)
+        if not texts:
+            return []
+
+        prepared = [self._prepare_document(text) for text in texts]
+        batch_words = [item[0] for item in prepared]
+        effective_layer_indices = self.layer_indices if self.layer_indices is not None else [self.layer_index]
+        per_doc_layer_scores = batched_attention_word_scores(
+            batch_words,
+            self.model_bundle,
+            layer_indices=effective_layer_indices,
+        )
+
+        results: list[list[str]] = []
+        base_method = method.removesuffix("_idf")
+        for (words, pos_tags, candidates, candidate_starts, candidate_ends, token_counts), per_doc_scores in zip(
+            prepared,
+            per_doc_layer_scores,
+        ):
+            if not candidates:
+                results.append([])
+                continue
+
+            per_layer_scores = [per_doc_scores[index] for index in effective_layer_indices]
+            if len(per_layer_scores) == 1:
+                scores_by_method = per_layer_scores[0]
+            else:
+                scores_by_method = {
+                    method_name: np.average(
+                        np.stack([scores[method_name] for scores in per_layer_scores], axis=0),
+                        axis=0,
+                        weights=self.layer_weights,
+                    )
+                    for method_name in per_layer_scores[0]
+                }
+
+            word_scores = scores_by_method[base_method]
+            if method.endswith("_idf"):
+                lookup = self._require_idf_lookup(idf_lookup)
+                tfidf_word_scores = self._tfidf_word_scores(words, pos_tags, token_counts, lookup)
+                word_scores = combine_word_scores(word_scores, tfidf_word_scores, mode="product")
+
+            results.append(
+                candidate_rank_from_word_scores(
+                    candidates,
+                    word_scores,
+                    top_k=top_k,
+                    token_counts=token_counts,
+                    words=words,
+                    candidate_starts=candidate_starts,
+                    candidate_ends=candidate_ends,
+                )
+            )
+        return results
+
+    def _prepare_document(
+        self,
+        text: str,
+    ) -> tuple[list[str], list[str], list[Candidate], np.ndarray, np.ndarray, dict[str, float]]:
+        words, pos_tags = segment_text(text, language=self.language)
+        candidates = build_candidates(words, pos_tags, language=self.language)
+        candidate_starts = np.fromiter((candidate.word_start for candidate in candidates), dtype=np.int32, count=len(candidates))
+        candidate_ends = np.fromiter((candidate.word_end for candidate in candidates), dtype=np.int32, count=len(candidates))
+        counts = dict(token_counter(words, pos_tags, language=self.language))
+        return words, pos_tags, candidates, candidate_starts, candidate_ends, counts
+
+    def _resolve_word_scores(
+        self,
+        words: Sequence[str],
+        pos_tags: Sequence[str],
+        method: str,
+        token_counts: dict[str, float],
+        idf_lookup: dict[str, float] | None,
+    ) -> np.ndarray:
+        self._validate_method(method, allow_hybrid=True)
+        scores_by_method = attention_word_scores(
+            words,
+            self.model_bundle,
+            layer_index=self.layer_index,
+            layer_indices=self.layer_indices,
+            layer_weights=self.layer_weights,
+        )
+        base_method = method.removesuffix("_idf")
+        word_scores = scores_by_method[base_method]
+        if method.endswith("_idf"):
+            lookup = self._require_idf_lookup(idf_lookup)
+            tfidf_word_scores = self._tfidf_word_scores(words, pos_tags, token_counts, lookup)
+            word_scores = combine_word_scores(word_scores, tfidf_word_scores, mode="product")
+        return word_scores
+
+    def _tfidf_word_scores(
+        self,
+        words: Sequence[str],
+        pos_tags: Sequence[str],
+        token_counts: dict[str, float],
+        idf_lookup: dict[str, float],
+    ) -> np.ndarray:
+        tfidf_values = {token: count * idf_lookup.get(token, 0.0) for token, count in token_counts.items()}
+        return word_scores_from_token_values(words, pos_tags, tfidf_values, language=self.language)
+
+    def _require_idf_lookup(self, idf_lookup: dict[str, float] | None) -> dict[str, float]:
+        lookup = idf_lookup if idf_lookup is not None else self.idf_lookup
+        if lookup is None:
+            raise ValueError("IDF-based methods require idf_lookup or a prior fit_idf() call.")
+        return lookup
+
+    @staticmethod
+    def _validate_method(
+        method: str,
+        allow_hybrid: bool,
+    ) -> None:
+        allowed_methods = ATTENTION_METHODS if not allow_hybrid else ALL_METHODS
+        if method not in allowed_methods:
+            raise ValueError(f"Unsupported method: {method}. Expected one of {allowed_methods}.")
+        if method.endswith("_idf") and not allow_hybrid:
+            raise ValueError(f"{method} is not supported for word-weight extraction.")
+
+
+def extract_keywords(
+    text: str,
+    model: str,
+    language: str = "zh",
+    method: str = "cls_attn",
+    top_k: int = 10,
+    device: str = "cpu",
+    idf_lookup: dict[str, float] | None = None,
+    layer_index: int = -1,
+) -> list[str]:
+    extractor = KeyAttenExtractor(
+        model=model,
+        language=language,
+        device=device,
+        layer_index=layer_index,
+    )
+    return extractor.extract_keywords(
+        text=text,
+        method=method,
+        top_k=top_k,
+        idf_lookup=idf_lookup,
+    )
+
+
+__all__ = [
+    "ALL_METHODS",
+    "HYBRID_METHODS",
+    "KeyAttenExtractor",
+    "extract_keywords",
+]

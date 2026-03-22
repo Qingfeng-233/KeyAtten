@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "keyatten"
+version = "0.1.0"
+description = "Attention-based keyword extraction with ordered semantic word weights"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "蒋林浩" },
+]
+dependencies = [
+    "torch>=2.0",
+    "transformers>=4.30",
+    "numpy>=1.24",
+    "jieba>=0.42",
+    "scikit-learn>=1.0",
+    "nltk>=3.8",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["keyatten*"]
