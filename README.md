@@ -17,7 +17,7 @@ Evaluated on 7 public datasets against 14 methods: +67% F1@10 over traditional b
 ## Installation
 
 ```bash
-pip install .
+pip install keyatten
 ```
 
 Dependencies: `torch>=2.0` `transformers>=4.30` `jieba` `scikit-learn` `nltk` `numpy`

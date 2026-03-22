@@ -17,7 +17,7 @@
 ## 安装
 
 ```bash
-pip install .
+pip install keyatten
 ```
 
 依赖：`torch>=2.0` `transformers>=4.30` `jieba` `scikit-learn` `nltk` `numpy`
