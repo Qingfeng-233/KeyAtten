@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from typing import Sequence
 
+import jieba
 import jieba.posseg as pseg
 import numpy as np
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
@@ -15,6 +16,7 @@ from .utils import normalize_phrase
 VALID_POS_PREFIXES = ("n", "eng", "v")
 PUNCT_RE = re.compile(r"^[\W_]+$", re.UNICODE)
 EN_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
+_BRACKET_RE = re.compile(r"[《\u300a](.+?)[》\u300b]")
 
 
 @dataclass(slots=True)
@@ -53,11 +55,20 @@ def is_valid_english_token(word: str) -> bool:
     return bool(re.search(r"[a-z]", lowered))
 
 
+def _register_bracketed_terms(text: str) -> None:
+    """自动将书名号《》内的内容注册到 jieba 词典，词性标记为专有名词。"""
+    for match in _BRACKET_RE.finditer(text):
+        term = match.group(1).strip()
+        if term:
+            jieba.add_word(term, tag="nz")
+
+
 def segment_text(text: str, language: str = "zh") -> tuple[list[str], list[str]]:
     if language.startswith("en"):
         words = EN_TOKEN_RE.findall(text)
         return words, ["eng"] * len(words)
 
+    _register_bracketed_terms(text)
     words: list[str] = []
     pos_tags: list[str] = []
     for token in pseg.cut(text):
