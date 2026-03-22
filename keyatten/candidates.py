@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Sequence
+from typing import Sequence
 
 import jieba.posseg as pseg
 import numpy as np
@@ -12,7 +12,7 @@ from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
 from .utils import normalize_phrase
 
 
-VALID_POS_PREFIXES = ("n", "nz", "eng", "v", "vn")
+VALID_POS_PREFIXES = ("n", "eng", "v")
 PUNCT_RE = re.compile(r"^[\W_]+$", re.UNICODE)
 EN_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
 
@@ -53,13 +53,13 @@ def is_valid_english_token(word: str) -> bool:
     return bool(re.search(r"[a-z]", lowered))
 
 
-def segment_text(text: str, language: str = "zh") -> tuple[List[str], List[str]]:
+def segment_text(text: str, language: str = "zh") -> tuple[list[str], list[str]]:
     if language.startswith("en"):
         words = EN_TOKEN_RE.findall(text)
         return words, ["eng"] * len(words)
 
-    words: List[str] = []
-    pos_tags: List[str] = []
+    words: list[str] = []
+    pos_tags: list[str] = []
     for token in pseg.cut(text):
         word = token.word.strip()
         if not word:
@@ -74,8 +74,8 @@ def build_candidates(
     pos_tags: Sequence[str],
     language: str = "zh",
     max_ngram: int = 4,
-) -> List[Candidate]:
-    candidates: List[Candidate] = []
+) -> list[Candidate]:
+    candidates: list[Candidate] = []
     seen = set()
     joiner = "" if language.startswith("zh") else " "
 
@@ -95,8 +95,6 @@ def build_candidates(
             else:
                 if not all(is_valid_english_token(words[index]) for index in range(start, end)):
                     break
-                if words[start].lower() in ENGLISH_STOP_WORDS or words[end - 1].lower() in ENGLISH_STOP_WORDS:
-                    continue
 
             phrase = joiner.join(words[start:end]).strip()
             if language.startswith("en"):
@@ -114,7 +112,7 @@ def build_candidates(
 def _candidate_score(
     candidate: Candidate,
     word_scores: Sequence[float],
-    token_counts: Dict[str, float] | None = None,
+    token_counts: dict[str, float] | None = None,
     words: Sequence[str] | None = None,
     aggregation_mode: str = "mean",
     repeat_boost: float = 0.0,
@@ -149,7 +147,7 @@ def _candidate_score(
 def candidate_score_values(
     candidates: Sequence[Candidate],
     word_scores: Sequence[float],
-    token_counts: Dict[str, float] | None = None,
+    token_counts: dict[str, float] | None = None,
     words: Sequence[str] | None = None,
     aggregation_mode: str = "mean",
     repeat_boost: float = 0.0,
@@ -190,7 +188,7 @@ def rank_candidates_from_scores(
     candidates: Sequence[Candidate],
     candidate_scores: Sequence[float],
     top_k: int = 30,
-) -> List[str]:
+) -> list[str]:
     if not candidates:
         return []
 
@@ -208,13 +206,13 @@ def candidate_rank_from_word_scores(
     candidates: Sequence[Candidate],
     word_scores: Sequence[float],
     top_k: int = 30,
-    token_counts: Dict[str, float] | None = None,
+    token_counts: dict[str, float] | None = None,
     words: Sequence[str] | None = None,
     aggregation_mode: str = "mean",
     repeat_boost: float = 0.0,
     candidate_starts: np.ndarray | None = None,
     candidate_ends: np.ndarray | None = None,
-) -> List[str]:
+) -> list[str]:
     candidate_scores = candidate_score_values(
         candidates,
         word_scores,

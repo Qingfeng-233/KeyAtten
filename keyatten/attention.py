@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Sequence
+from typing import Sequence
 
 import numpy as np
 import torch
@@ -22,7 +22,7 @@ def build_model_bundle(model_name: str, device: str) -> dict:
     return {"tokenizer": tokenizer, "model": model, "device": device}
 
 
-def _normalize_array(values: np.ndarray) -> np.ndarray:
+def normalize_array(values: np.ndarray) -> np.ndarray:
     if values.size == 0:
         return values
     min_value = float(values.min())
@@ -33,7 +33,7 @@ def _normalize_array(values: np.ndarray) -> np.ndarray:
 
 
 def _aggregate_subwords_to_words(
-    word_ids: List[int | None],
+    word_ids: list[int | None],
     token_scores: np.ndarray,
     word_count: int,
 ) -> np.ndarray:
@@ -56,10 +56,10 @@ def _resolve_layer_index(layer_index: int, layer_count: int) -> int:
 
 
 def _scores_from_attention_map(
-    word_ids: List[int | None],
+    word_ids: list[int | None],
     attention_map: np.ndarray,
     word_count: int,
-) -> Dict[str, np.ndarray]:
+) -> dict[str, np.ndarray]:
     cls_scores = attention_map[0]
     received_scores = attention_map.sum(axis=0)
 
@@ -69,7 +69,7 @@ def _scores_from_attention_map(
     redistributed = np.divide(redistributed, col_sums, out=np.zeros_like(redistributed), where=col_sums > 0.0)
     proportional_scores = redistributed.sum(axis=1)
     samrank_scores = global_scores + proportional_scores
-    fusion_scores = _normalize_array(cls_scores) * _normalize_array(received_scores)
+    fusion_scores = normalize_array(cls_scores) * normalize_array(received_scores)
 
     return {
         "cls_attn": _aggregate_subwords_to_words(word_ids, cls_scores, word_count),
@@ -80,9 +80,9 @@ def _scores_from_attention_map(
 
 
 def _aggregate_layer_word_scores(
-    per_layer_scores: Sequence[Dict[str, np.ndarray]],
+    per_layer_scores: Sequence[dict[str, np.ndarray]],
     layer_weights: Sequence[float] | None = None,
-) -> Dict[str, np.ndarray]:
+) -> dict[str, np.ndarray]:
     if not per_layer_scores:
         return {}
 
@@ -94,7 +94,7 @@ def _aggregate_layer_word_scores(
         raise ValueError("layer_weights sum to zero.")
 
     normalized_weights = weights / weight_sum
-    aggregated: Dict[str, np.ndarray] = {}
+    aggregated: dict[str, np.ndarray] = {}
     for method_name in per_layer_scores[0]:
         stacked = np.stack([layer_scores[method_name] for layer_scores in per_layer_scores], axis=0)
         aggregated[method_name] = np.average(stacked, axis=0, weights=normalized_weights)
@@ -106,7 +106,7 @@ def batched_attention_word_scores(
     model_bundle: dict,
     layer_indices: Sequence[int],
     batch_size: int = 4,
-) -> List[Dict[int, Dict[str, np.ndarray]]]:
+) -> list[dict[int, dict[str, np.ndarray]]]:
     if not batch_words:
         return []
 
@@ -114,7 +114,7 @@ def batched_attention_word_scores(
     model = model_bundle["model"]
     device = model_bundle["device"]
 
-    results: List[Dict[int, Dict[str, np.ndarray]]] = []
+    results: list[dict[int, dict[str, np.ndarray]]] = []
     for start in range(0, len(batch_words), batch_size):
         word_batch = [list(words) for words in batch_words[start : start + batch_size]]
         encoded = tokenizer(
@@ -139,7 +139,7 @@ def batched_attention_word_scores(
         }
 
         for item_index, words in enumerate(word_batch):
-            per_item_scores: Dict[int, Dict[str, np.ndarray]] = {}
+            per_item_scores: dict[int, dict[str, np.ndarray]] = {}
             valid_token_count = int(encoded["attention_mask"][item_index].sum().item())
             valid_word_ids = word_ids_per_item[item_index][:valid_token_count]
             for layer_index in layer_indices:
@@ -156,7 +156,7 @@ def attention_word_scores(
     layer_index: int = -1,
     layer_indices: Sequence[int] | None = None,
     layer_weights: Sequence[float] | None = None,
-) -> Dict[str, np.ndarray]:
+) -> dict[str, np.ndarray]:
     effective_layer_indices = list(layer_indices) if layer_indices else [layer_index]
     batched_scores = batched_attention_word_scores(
         [list(words)],
@@ -172,7 +172,7 @@ def attention_word_scores(
 
 __all__ = [
     "ATTENTION_METHODS",
-    "build_model_bundle",
+    "normalize_array",
     "attention_word_scores",
     "batched_attention_word_scores",
 ]

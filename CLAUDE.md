@@ -61,7 +61,7 @@ hybrid.py     → candidates.py (复用词有效性检查函数)
 
 ## 语言处理差异
 
-- 中文：jieba.posseg 分词，有效词性前缀 `n, nz, eng, vn`，最大 4-gram
+- 中文：jieba.posseg 分词，有效词性前缀 `n, eng, v`，最大 4-gram
 - 英文：正则表达式分词，过滤停用词和单字符，Porter 词干化用于规范化
 
 ## 声明
