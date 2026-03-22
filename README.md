@@ -159,6 +159,14 @@ KeyAttenExtractor(
 
 `WordWeight` 包含字段：`word`、`index`、`weight`、`pos_tag`。
 
+## 引用
+
+本项目的 `samrank` 方法引用了以下论文的排序公式：
+
+> Kang, B., & Shin, H. (2023). *SAMRank: Unsupervised Keyphrase Extraction using Self-Attention Map in BERT and GPT-2.* EMNLP 2023. [DOI: 10.18653/v1/2023.emnlp-main.630](https://doi.org/10.18653/v1/2023.emnlp-main.630)
+
+`cls_attn`、`received_attn`、`fusion_attn` 及所有 `_idf` 混合策略为本项目原创。
+
 ## 许可证
 
 [MIT](./LICENSE)
