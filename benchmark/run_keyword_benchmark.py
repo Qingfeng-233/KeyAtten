@@ -37,6 +37,7 @@ MODEL_REGISTRY = [
     {"name": "moka-ai/m3e-small", "benchmark_family": "none", "benchmark_score": None},
     {"name": "thenlper/gte-small-zh", "benchmark_family": "c-mteb", "benchmark_score": 60.08},
     {"name": "thenlper/gte-base-zh", "benchmark_family": "c-mteb", "benchmark_score": 65.92},
+    {"name": "Qwen/Qwen3-Embedding-0.6B", "benchmark_family": "none", "benchmark_score": None},
     {"name": "sentence-transformers/all-MiniLM-L6-v2", "benchmark_family": "none", "benchmark_score": None},
     {"name": "distilbert-base-uncased", "benchmark_family": "none", "benchmark_score": None},
     {"name": "prajjwal1/bert-tiny", "benchmark_family": "none", "benchmark_score": None},

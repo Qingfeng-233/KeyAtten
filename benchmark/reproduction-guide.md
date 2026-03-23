@@ -43,6 +43,7 @@ python download_hf_assets.py --model "BAAI/bge-small-zh-v1.5" --root-dir "." --t
 python download_hf_assets.py --model "thenlper/gte-base-zh" --root-dir "." --timeout 600 --workers 8
 python download_hf_assets.py --model "moka-ai/m3e-base" --root-dir "." --timeout 600 --workers 4
 python download_hf_assets.py --model "moka-ai/m3e-small" --root-dir "." --timeout 600 --workers 1
+python download_hf_assets.py --model "Qwen/Qwen3-Embedding-0.6B" --root-dir "." --timeout 900 --workers 4
 
 # 英文模型
 python download_hf_assets.py --model "sentence-transformers/all-MiniLM-L6-v2" --root-dir "." --timeout 900 --workers 4
@@ -60,6 +61,20 @@ python run_keyword_benchmark.py `
   --output-dir "outputs_round10_hybrid_mean" `
   --datasets csl_test shencecup_labeled `
   --models thenlper/gte-small-zh `
+  --shencecup-limit 100 `
+  --skip-yake `
+  --device cuda
+```
+
+### Embedding 模型对照
+
+```powershell
+# gte-small-zh vs Qwen3-Embedding-0.6B
+python run_keyword_benchmark.py `
+  --root-dir "." `
+  --output-dir "outputs_embedding_compare_gte_vs_qwen3_0_6b" `
+  --datasets csl_test shencecup_labeled `
+  --models thenlper/gte-small-zh Qwen/Qwen3-Embedding-0.6B `
   --shencecup-limit 100 `
   --skip-yake `
   --device cuda
@@ -138,6 +153,7 @@ python generate_attention_case_study.py `
 | Krapivin2009-fulltext | `outputs_round12_krapivin_fulltext_minilm/keyword_benchmark_results.json` |
 | 英文短文 | `outputs_round6_en_crosslingual/keyword_benchmark_results.json` |(archived)
 | 混合基线对照 | `outputs_round13_baseline_hybrid_compare/keyword_benchmark_results.json` |
+| Embedding 模型对照 | `outputs_embedding_compare_gte_vs_qwen3_0_6b/keyword_benchmark_results.json` |
 | Decoder-only (0.8B) | `transformer_generalization/results/qwen_decoder_benchmark_20.json` |
 | Decoder-only (2B) | `transformer_generalization/results/qwen2b_decoder_benchmark_20.json` |
 

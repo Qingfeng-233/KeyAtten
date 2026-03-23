@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import re
 import sys
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence
@@ -355,6 +355,20 @@ def _mean_pool(last_hidden_state: torch.Tensor, attention_mask: torch.Tensor) ->
     return masked.sum(dim=1) / denom
 
 
+def _last_token_pool(last_hidden_state: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    if attention_mask[:, -1].sum().item() == attention_mask.shape[0]:
+        return last_hidden_state[:, -1]
+    sequence_lengths = attention_mask.sum(dim=1) - 1
+    batch_indices = torch.arange(last_hidden_state.shape[0], device=last_hidden_state.device)
+    return last_hidden_state[batch_indices, sequence_lengths]
+
+
+def _resolve_embedding_pooling(model_name: str) -> str:
+    if "qwen3-embedding" in model_name.lower():
+        return "last_token"
+    return "mean"
+
+
 def build_model_bundle(model_name: str, device: str) -> dict:
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
     try:
@@ -363,29 +377,41 @@ def build_model_bundle(model_name: str, device: str) -> dict:
         model = AutoModel.from_pretrained(model_name, output_attentions=True)
     model.to(device)
     model.eval()
-    return {"tokenizer": tokenizer, "model": model, "device": device}
+    return {
+        "tokenizer": tokenizer,
+        "model": model,
+        "device": device,
+        "embedding_pooling": _resolve_embedding_pooling(model_name),
+        "embedding_cache": OrderedDict(),
+        "embedding_cache_max_entries": 20000,
+    }
 
 
 def embed_texts(
     model_bundle: dict,
     texts: Sequence[str],
     batch_size: int = 16,
+    max_length: int = 512,
     progress_label: str | None = None,
     log_every_batches: int = 0,
 ) -> np.ndarray:
     tokenizer = model_bundle["tokenizer"]
     model = model_bundle["model"]
     device = model_bundle["device"]
+    embedding_pooling = model_bundle.get("embedding_pooling", "mean")
     outputs: List[np.ndarray] = []
     total_batches = max(math.ceil(len(texts) / batch_size), 1)
     with torch.no_grad():
         for batch_index, start in enumerate(range(0, len(texts), batch_size), start=1):
             batch = list(texts[start : start + batch_size])
-            encoded = tokenizer(batch, padding=True, truncation=True, max_length=512, return_tensors="pt")
+            encoded = tokenizer(batch, padding=True, truncation=True, max_length=max_length, return_tensors="pt")
             encoded = {key: value.to(device) for key, value in encoded.items()}
             hidden = model(**encoded, output_attentions=False).last_hidden_state
-            pooled = _mean_pool(hidden, encoded["attention_mask"])
-            outputs.append(torch.nn.functional.normalize(pooled, dim=1).cpu().numpy())
+            if embedding_pooling == "last_token":
+                pooled = _last_token_pool(hidden, encoded["attention_mask"])
+            else:
+                pooled = _mean_pool(hidden, encoded["attention_mask"])
+            outputs.append(torch.nn.functional.normalize(pooled, dim=1).float().cpu().numpy())
             if progress_label and (
                 batch_index == 1
                 or batch_index == total_batches
@@ -393,6 +419,44 @@ def embed_texts(
             ):
                 print(f"[{progress_label}] batch {batch_index}/{total_batches}")
     return np.concatenate(outputs, axis=0) if outputs else np.empty((0, 0), dtype=np.float32)
+
+
+def embed_texts_cached(
+    model_bundle: dict,
+    texts: Sequence[str],
+    batch_size: int = 16,
+    max_length: int = 32,
+) -> np.ndarray:
+    if not texts:
+        return np.empty((0, 0), dtype=np.float32)
+
+    cache: OrderedDict[str, np.ndarray] | None = model_bundle.get("embedding_cache")
+    max_entries = int(model_bundle.get("embedding_cache_max_entries", 0) or 0)
+    if cache is None or max_entries <= 0:
+        return embed_texts(model_bundle, texts, batch_size=batch_size, max_length=max_length)
+
+    outputs: List[np.ndarray | None] = [None] * len(texts)
+    missing_indices: List[int] = []
+    missing_texts: List[str] = []
+    for index, text in enumerate(texts):
+        cached = cache.get(text)
+        if cached is not None:
+            cache.move_to_end(text)
+            outputs[index] = cached
+            continue
+        missing_indices.append(index)
+        missing_texts.append(text)
+
+    if missing_texts:
+        embedded = embed_texts(model_bundle, missing_texts, batch_size=batch_size, max_length=max_length)
+        for index, text, vector in zip(missing_indices, missing_texts, embedded, strict=False):
+            outputs[index] = vector
+            cache[text] = vector
+            cache.move_to_end(text)
+            while len(cache) > max_entries:
+                cache.popitem(last=False)
+
+    return np.stack([np.asarray(vector, dtype=np.float32) for vector in outputs], axis=0)
 
 
 def keybert_keywords_from_doc_embedding(
@@ -416,11 +480,17 @@ def keybert_candidate_scores_from_doc_embedding(
     doc_embedding: np.ndarray,
     model_bundle: dict,
     batch_size: int = 16,
+    candidate_max_length: int = 32,
 ) -> np.ndarray:
     candidate_texts = [candidate.text for candidate in candidates]
     if not candidate_texts:
         return np.zeros(0, dtype=np.float32)
-    candidate_embeddings = embed_texts(model_bundle, candidate_texts, batch_size=batch_size)
+    candidate_embeddings = embed_texts_cached(
+        model_bundle,
+        candidate_texts,
+        batch_size=max(batch_size, 64),
+        max_length=candidate_max_length,
+    )
     return np.asarray(candidate_embeddings @ doc_embedding, dtype=np.float32)
 
 
@@ -494,6 +564,35 @@ def _aggregate_subwords_to_words(word_ids: List[int | None], token_scores: np.nd
     return sums / counts
 
 
+def _word_ids_to_tensor(word_ids: List[int | None], device: torch.device) -> torch.Tensor:
+    return torch.tensor(
+        [-1 if word_id is None else int(word_id) for word_id in word_ids],
+        dtype=torch.long,
+        device=device,
+    )
+
+
+def _aggregate_subwords_to_words_torch(
+    word_ids: torch.Tensor,
+    token_scores: torch.Tensor,
+    word_count: int,
+) -> np.ndarray:
+    if word_count <= 0:
+        return np.zeros(0, dtype=np.float32)
+
+    valid_mask = (word_ids >= 0) & (word_ids < word_count)
+    if not bool(valid_mask.any().item()):
+        return np.zeros(word_count, dtype=np.float32)
+
+    valid_word_ids = word_ids[valid_mask]
+    valid_scores = token_scores[valid_mask].float()
+    sums = torch.zeros(word_count, dtype=torch.float32, device=token_scores.device)
+    counts = torch.zeros(word_count, dtype=torch.float32, device=token_scores.device)
+    sums.scatter_add_(0, valid_word_ids, valid_scores)
+    counts.scatter_add_(0, valid_word_ids, torch.ones_like(valid_scores))
+    return (sums / counts.clamp_min(1.0)).cpu().numpy()
+
+
 def _resolve_layer_index(layer_index: int, layer_count: int) -> int:
     resolved = layer_index if layer_index >= 0 else layer_count + layer_index
     if resolved < 0 or resolved >= layer_count:
@@ -522,6 +621,40 @@ def _scores_from_attention_map(
         "received_attn": _aggregate_subwords_to_words(word_ids, received_scores, word_count),
         "samrank": _aggregate_subwords_to_words(word_ids, samrank_scores, word_count),
         "fusion_attn": _aggregate_subwords_to_words(word_ids, fusion_scores, word_count),
+    }
+
+
+def _normalize_tensor(values: torch.Tensor) -> torch.Tensor:
+    if values.numel() == 0:
+        return values
+    min_value = values.min()
+    max_value = values.max()
+    if bool(torch.isclose(min_value, max_value).item()):
+        return torch.zeros_like(values)
+    return (values - min_value) / (max_value - min_value)
+
+
+def _scores_from_attention_map_torch(
+    word_ids: torch.Tensor,
+    attention_map: torch.Tensor,
+    word_count: int,
+) -> Dict[str, np.ndarray]:
+    attention = attention_map.float()
+    cls_scores = attention[0]
+    received_scores = attention.sum(dim=0)
+
+    global_scores = received_scores
+    redistributed = attention * global_scores.unsqueeze(0)
+    redistributed = redistributed / redistributed.sum(dim=0, keepdim=True).clamp_min(1e-10)
+    proportional_scores = redistributed.sum(dim=1)
+    samrank_scores = global_scores + proportional_scores
+    fusion_scores = _normalize_tensor(cls_scores) * _normalize_tensor(received_scores)
+
+    return {
+        "cls_attn": _aggregate_subwords_to_words_torch(word_ids, cls_scores, word_count),
+        "received_attn": _aggregate_subwords_to_words_torch(word_ids, received_scores, word_count),
+        "samrank": _aggregate_subwords_to_words_torch(word_ids, samrank_scores, word_count),
+        "fusion_attn": _aggregate_subwords_to_words_torch(word_ids, fusion_scores, word_count),
     }
 
 
@@ -576,29 +709,33 @@ def batched_attention_word_scores(
         )
         word_ids_per_item = [encoded.word_ids(batch_index=index) for index in range(len(word_batch))]
         encoded = {key: value.to(device) for key, value in encoded.items()}
+        valid_token_counts = [int(encoded["attention_mask"][index].sum().item()) for index in range(len(word_batch))]
+        word_id_tensors = [
+            _word_ids_to_tensor(word_ids_per_item[index][: valid_token_counts[index]], device)
+            for index in range(len(word_batch))
+        ]
 
         with torch.no_grad():
             outputs = model(**encoded, output_attentions=True)
 
         layer_count = len(outputs.attentions)
         resolved_indices = {layer_index: _resolve_layer_index(layer_index, layer_count) for layer_index in layer_indices}
-        attention_by_layer = {
-            layer_index: outputs.attentions[resolved_index].mean(dim=1).detach().cpu().numpy()
-            for layer_index, resolved_index in resolved_indices.items()
-        }
+        per_item_scores_list: List[Dict[int, Dict[str, np.ndarray]]] = [dict() for _ in word_batch]
 
-        for item_index, words in enumerate(word_batch):
-            per_item_scores: Dict[int, Dict[str, np.ndarray]] = {}
-            valid_token_count = int(encoded["attention_mask"][item_index].sum().item())
-            valid_word_ids = word_ids_per_item[item_index][:valid_token_count]
-            for layer_index in layer_indices:
-                attention_map = attention_by_layer[layer_index][item_index][:valid_token_count, :valid_token_count]
-                per_item_scores[layer_index] = _scores_from_attention_map(
-                    valid_word_ids,
+        for layer_index, resolved_index in resolved_indices.items():
+            layer_attention = outputs.attentions[resolved_index].mean(dim=1).detach()
+            for item_index, words in enumerate(word_batch):
+                valid_token_count = valid_token_counts[item_index]
+                attention_map = layer_attention[item_index, :valid_token_count, :valid_token_count]
+                per_item_scores_list[item_index][layer_index] = _scores_from_attention_map_torch(
+                    word_id_tensors[item_index],
                     attention_map,
                     len(words),
                 )
-            results.append(per_item_scores)
+            del layer_attention
+
+        results.extend(per_item_scores_list)
+        del outputs
         if progress_label and (
             batch_index == 1
             or batch_index == total_batches
