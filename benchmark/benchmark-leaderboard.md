@@ -2,6 +2,7 @@
 
 > 本表为 V1 大横屏主榜的完整版本，包含 F1@10 和 R@10 双指标。
 > 每个数据集仅保留各方法组下的最优代表。
+> 默认发布模型仍然是 `gte-small-zh`；Decoder-only 结果保留为探索性附栏，不作为默认交付口径。
 
 ## 指标说明
 
@@ -34,6 +35,13 @@
 - Krapivin2009-fulltext：`测试沙箱/outputs_round12_krapivin_fulltext_minilm/`
 - 英文短文：`测试沙箱/archive/experiments/outputs_round6_en_crosslingual/`
 - Decoder-only：`测试沙箱/transformer_generalization/results/`
+
+## 发布建议
+
+- 默认发布模型：`gte-small-zh`
+- 默认发布方法：`received_attn`、`samrank`、`*_idf`
+- 默认轻量部署方向：`gte-small-zh + ONNX Runtime`
+- Decoder-only 与更大向量模型结果：保留为探索性补充，不进入默认发布叙事
 
 ## SemEval2010-fulltext 完整排名
 

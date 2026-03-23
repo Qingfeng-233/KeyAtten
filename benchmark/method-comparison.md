@@ -9,7 +9,7 @@
 | TextRank | 图方法 | 否 | 无模型依赖 | 不限 | 中 | 强 | 最稳定的传统基线 |
 | KeyBERT | 向量相似度 | 否 | m3e-small / distilbert | 受模型限制 | 中 | 中 | 最"吃模型升级红利" |
 | **CLS-Attn** | Attention | 是 | gte-small-zh | 512 | 弱 | 强 | 核心方法，直接取 [CLS] 行注意力 |
-| **Received-Attn** | Attention | 否 | gte-small-zh / m3e-small / Qwen | 512 / 262K | 强 | 强 | 最稳定的 Attention 方法 |
+| **Received-Attn** | Attention | 否 | gte-small-zh / m3e-small / Qwen | 512 / 262K | 强 | 强 | 最稳定的 Attention 方法；发布默认优先 `gte-small-zh` |
 | **SAMRank** | Attention | 否 | gte-small-zh | 512 | 中 | 中 | 新闻场景最强的 Encoder 方法 |
 | **Fusion-Attn** | Attention | 部分 | gte-small-zh | 512 | 中 | 中 | CLS × Received 融合增强版 |
 | **\*_idf 变体** | Attention + IDF | 同上 | 同上 | 同上 | 同上 | 中 | 长文场景显著增强 |
@@ -66,3 +66,9 @@
 1. **Attention 质量与 Embedding 模型性能不强相关**：更强的 Embedding 模型不一定带来更好的 Attention 关键词提取效果
 2. **Attention 提供的区分度远超 Embedding 相似度**：在测试样本中，[CLS] 对核心关键词的注意力权重可达非关键词的 8.5 倍，而 Embedding 相似度差距仅 1.2 倍
 3. **模型规模不是唯一因素**：Qwen3.5-0.8B 在新闻场景反超 2B 版本，说明 Attention 机制和领域匹配同样关键
+
+## 发布口径
+
+1. 默认发布模型为 `gte-small-zh`，因为它在中文主线上稳定、轻量、易部署。
+2. 默认发布方法为 `received_attn / samrank / *_idf`，而不是更大的向量模型路线。
+3. Qwen 与 decoder-only 结果保留为研究扩展，不作为默认发布配置。

@@ -20,6 +20,13 @@ KeyAtten provides 4 pure attention methods (`cls_attn`, `received_attn`, `samran
 - **Architecture Generalization**: Attention-based keyword extraction works on both Encoder and Decoder-only architectures
 - **Ultra-Low Cost**: Only 22M–33M parameter models, single forward pass, zero training, zero labeling
 
+### Release Position
+
+- The default release model is `gte-small-zh`
+- The default release methods are encoder-side `received_attn`, `samrank`, and their `_idf` hybrids
+- Decoder-only and larger embedding model results are retained as exploratory evidence, not the default production path
+- The lightweight deployment route is `gte-small-zh + ONNX Runtime`
+
 ---
 
 ## Evaluation Coverage
@@ -66,6 +73,8 @@ KeyAtten provides 4 pure attention methods (`cls_attn`, `received_attn`, `samran
 2. **Chinese Academic**: `samrank_idf` surpasses the strongest traditional baseline (TF-IDF), with IDF hybrid providing the key gain
 3. **English Long Documents**: `cls_attn_idf` consistently leads by ~80% over external baselines on two independent fulltext datasets; top 4 are all KeyAtten-IDF methods
 4. **English Short Documents**: `fusion_attn` matches the best external method (KeyBERT) but does not pull ahead
+
+For release and deployment, the project standardizes on the encoder route around `gte-small-zh`. Decoder-only results remain useful as research evidence, but not as the default shipped configuration.
 
 ---
 
@@ -172,7 +181,7 @@ Attention-based keyword extraction has been validated on Decoder-only long-conte
 | Decoder-only | Qwen3.5-2B | 2B | **0.1568** | 0.2221 |
 | Encoder | gte-small-zh | ~33M | 0.1773 | 0.2495 |
 
-Model scale is not the only factor: Qwen3.5-0.8B outperforms the 2B version on news, suggesting attention mechanism and domain fit matter as much as size.
+Model scale is not the only factor: Qwen3.5-0.8B outperforms the 2B version on news, suggesting attention mechanism and domain fit matter as much as size. These decoder-only results are kept as exploratory validation; the default release recommendation remains `gte-small-zh`.
 
 ---
 

@@ -6,6 +6,14 @@
 
 在 7 个公开数据集、14 种方法的对比评测中，中文新闻场景 F1@10 较传统基线提升 67%，英文长文场景较外部最强方法提升约 78%。
 
+## 默认发布路线
+
+- 默认中文模型：`thenlper/gte-small-zh`
+- 默认发布方法：`received_attn`、`samrank` 及其 `_idf` 变体
+- 默认部署方向：小模型 + 可解释 Attention + 轻量算子
+
+当前仓库把 `gte-small-zh` 作为正式发布默认模型。更大的向量模型和 decoder-only 实验结果会保留在 benchmark 中，但不作为默认交付口径。
+
 ## 特性
 
 - 直接利用预训练模型的注意力权重提取关键词，无需额外训练或标注
@@ -25,12 +33,14 @@ pip install keyatten
 ```bash
 pip install "keyatten[inference,zh]"   # 中文关键词提取
 pip install "keyatten[inference,en]"   # 英文关键词提取
+pip install "keyatten[inference,zh,lightweight]"  # 中文轻量部署
 pip install "keyatten[full]"           # 安装全部可选依赖
 ```
 
 可选依赖分组：
 
 - `inference`: `torch>=2.0`、`transformers>=4.30`
+- `lightweight`: `onnx>=1.16`、`onnxruntime>=1.18`
 - `zh`: `jieba>=0.42`
 - `en`: `scikit-learn>=1.0`、`nltk>=3.8`
 
@@ -134,6 +144,21 @@ keywords = extract_keywords(
 |------|------|--------|
 | 中文 | `thenlper/gte-small-zh` | ~33M |
 | 英文 | `sentence-transformers/all-MiniLM-L6-v2` | ~22M |
+
+## 轻量部署
+
+当前推荐的轻量部署路线是 `gte-small-zh + ONNX Runtime`。在测试验证中，`gte-small-zh` 已经可以稳定导出 attention 并复现 `received_attn` 词分数，适合作为后续轻量算子和服务化部署的默认路线。
+
+推荐安装命令：
+
+```bash
+pip install "keyatten[inference,zh,lightweight]"
+```
+
+主仓库说明见：
+
+- [gte-lightweight-deployment.md](./benchmark/gte-lightweight-deployment.md)
+- [gte_onnx_probe.py](./benchmark/gte_onnx_probe.py)
 
 ## 评测摘要
 

@@ -6,6 +6,14 @@ Attention-based keyword extraction framework. Zero training, zero labeling, sing
 
 Evaluated on 7 public datasets against 14 methods: +67% F1@10 over traditional baselines on Chinese news, +78% over the strongest external method on English long documents.
 
+## Default Release Path
+
+- Default Chinese model: `thenlper/gte-small-zh`
+- Default release methods: `received_attn`, `samrank`, and their `_idf` variants
+- Default deployment path: small encoder + interpretable attention + lightweight operators
+
+The repository now treats `gte-small-zh` as the default production model. Larger embedding models and decoder-only experiments are kept as benchmark exploration, not as the default release path.
+
 ## Features
 
 - Extracts keywords directly from pretrained model attention weights — no fine-tuning or labeling required
@@ -25,12 +33,14 @@ Minimal install only includes `numpy` so importing the package does not pull the
 ```bash
 pip install "keyatten[inference,zh]"   # Chinese keyword extraction
 pip install "keyatten[inference,en]"   # English keyword extraction
+pip install "keyatten[inference,zh,lightweight]"  # Chinese lightweight deployment
 pip install "keyatten[full]"           # All optional dependencies
 ```
 
 Optional dependency groups:
 
 - `inference`: `torch>=2.0`, `transformers>=4.30`
+- `lightweight`: `onnx>=1.16`, `onnxruntime>=1.18`
 - `zh`: `jieba>=0.42`
 - `en`: `scikit-learn>=1.0`, `nltk>=3.8`
 
@@ -134,6 +144,21 @@ Side-by-side comparison of `cls_attn` vs `samrank` across domains (model: `gte-s
 |----------|-------|------------|
 | Chinese | `thenlper/gte-small-zh` | ~33M |
 | English | `sentence-transformers/all-MiniLM-L6-v2` | ~22M |
+
+## Lightweight Deployment
+
+The recommended lightweight deployment path is `gte-small-zh + ONNX Runtime`. Internal validation shows that `gte-small-zh` can export token attention and reproduce `received_attn` word scores with stable numerical agreement, making it the default route for lightweight operators and deployment work.
+
+Recommended install:
+
+```bash
+pip install "keyatten[inference,zh,lightweight]"
+```
+
+See:
+
+- [gte-lightweight-deployment.md](./benchmark/gte-lightweight-deployment.md)
+- [gte_onnx_probe.py](./benchmark/gte_onnx_probe.py)
 
 ## Evaluation Summary
 

@@ -21,6 +21,10 @@ inference = [
     "torch>=2.0",
     "transformers>=4.30",
 ]
+lightweight = [
+    "onnx>=1.16",
+    "onnxruntime>=1.18",
+]
 zh = [
     "jieba>=0.42",
 ]
@@ -31,6 +35,8 @@ en = [
 full = [
     "torch>=2.0",
     "transformers>=4.30",
+    "onnx>=1.16",
+    "onnxruntime>=1.18",
     "jieba>=0.42",
     "scikit-learn>=1.0",
     "nltk>=3.8",

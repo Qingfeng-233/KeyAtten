@@ -66,7 +66,7 @@ python run_keyword_benchmark.py `
   --device cuda
 ```
 
-### Embedding 模型对照
+### Embedding 模型对照（探索性）
 
 ```powershell
 # gte-small-zh vs Qwen3-Embedding-0.6B
@@ -79,6 +79,8 @@ python run_keyword_benchmark.py `
   --skip-yake `
   --device cuda
 ```
+
+这组对照用于验证更大 embedding 模型是否值得进入主线。当前默认发布模型仍然是 `gte-small-zh`。
 
 ### 英文长文评测
 
@@ -162,3 +164,4 @@ python generate_attention_case_study.py `
 - `m3e-small` 下载时建议使用 `--workers 1` 以提高稳定性
 - 所有评测命令需在 `benchmark/` 目录下执行
 - 需要 CUDA GPU 以获得合理的运行速度
+- 如果目标是默认发布路线，优先跑 `gte-small-zh` 与相关轻量部署验证，而不是探索性 Qwen 对照
