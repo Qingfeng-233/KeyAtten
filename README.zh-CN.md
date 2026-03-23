@@ -40,7 +40,7 @@ pip install "keyatten[full]"           # 安装全部可选依赖
 可选依赖分组：
 
 - `inference`: `torch>=2.0`、`transformers>=4.30`
-- `lightweight`: `onnx>=1.16`、`onnxruntime>=1.18`
+- `lightweight`: `onnx>=1.16`、`onnxruntime>=1.18`、`tokenizers>=0.15`
 - `zh`: `jieba>=0.42`
 - `en`: `scikit-learn>=1.0`、`nltk>=3.8`
 
@@ -152,8 +152,33 @@ keywords = extract_keywords(
 推荐安装命令：
 
 ```bash
-pip install "keyatten[inference,zh,lightweight]"
+pip install "keyatten[zh,lightweight]"
 ```
+
+轻量后端示例：
+
+```python
+from keyatten import KeyAttenExtractor
+
+ext = KeyAttenExtractor(
+    model="/path/to/thenlper__gte-small-zh",
+    language="zh",
+    backend="onnx",
+    onnx_path="/path/to/attention_last.onnx",
+)
+
+keywords = ext.extract_keywords(
+    "自然语言处理用于关键词提取与文本分析",
+    method="received_attn",
+)
+```
+
+说明：
+
+- `model` 指向本地 `gte-small-zh` 模型目录，用于读取 `tokenizer.json`
+- `onnx_path` 指向导出的 attention ONNX 文件
+- 当前轻量后端支持单层 attention，适合默认发布路线的 `gte-small-zh`
+- 如果要自行导出 ONNX 文件，再额外安装 `keyatten[inference,zh,lightweight]`
 
 主仓库说明见：
 
@@ -183,6 +208,8 @@ KeyAttenExtractor(
     model: str,                         # Hugging Face 模型名称
     language: str = "zh",               # "zh" 或 "en"
     device: str = "cpu",                # 计算设备
+    backend: str = "auto",              # "auto" / "torch" / "onnx"
+    onnx_path: str | None = None,       # ONNX attention 文件路径
     layer_index: int = -1,              # 单层索引（-1 = 最后一层）
     layer_indices: list[int] = None,    # 多层索引列表
     layer_weights: list[float] = None,  # 多层权重列表

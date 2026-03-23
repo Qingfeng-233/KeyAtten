@@ -40,7 +40,7 @@ pip install "keyatten[full]"           # All optional dependencies
 Optional dependency groups:
 
 - `inference`: `torch>=2.0`, `transformers>=4.30`
-- `lightweight`: `onnx>=1.16`, `onnxruntime>=1.18`
+- `lightweight`: `onnx>=1.16`, `onnxruntime>=1.18`, `tokenizers>=0.15`
 - `zh`: `jieba>=0.42`
 - `en`: `scikit-learn>=1.0`, `nltk>=3.8`
 
@@ -152,8 +152,33 @@ The recommended lightweight deployment path is `gte-small-zh + ONNX Runtime`. In
 Recommended install:
 
 ```bash
-pip install "keyatten[inference,zh,lightweight]"
+pip install "keyatten[zh,lightweight]"
 ```
+
+Lightweight backend example:
+
+```python
+from keyatten import KeyAttenExtractor
+
+ext = KeyAttenExtractor(
+    model="/path/to/thenlper__gte-small-zh",
+    language="zh",
+    backend="onnx",
+    onnx_path="/path/to/attention_last.onnx",
+)
+
+keywords = ext.extract_keywords(
+    "自然语言处理用于关键词提取与文本分析",
+    method="received_attn",
+)
+```
+
+Notes:
+
+- `model` should point to a local `gte-small-zh` directory so KeyAtten can read `tokenizer.json`
+- `onnx_path` should point to the exported attention ONNX file
+- the lightweight backend currently supports a single exported attention layer, which matches the default `gte-small-zh` release path
+- if you want to export the ONNX file yourself, install `keyatten[inference,zh,lightweight]` instead
 
 See:
 
@@ -183,6 +208,8 @@ KeyAttenExtractor(
     model: str,                         # Hugging Face model name
     language: str = "zh",               # "zh" or "en"
     device: str = "cpu",                # compute device
+    backend: str = "auto",              # "auto" / "torch" / "onnx"
+    onnx_path: str | None = None,       # ONNX attention file path
     layer_index: int = -1,              # single layer index (-1 = last layer)
     layer_indices: list[int] = None,    # multi-layer indices
     layer_weights: list[float] = None,  # multi-layer weights

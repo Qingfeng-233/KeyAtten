@@ -33,6 +33,8 @@ class KeyAttenExtractor:
         model: str,
         language: str = "zh",
         device: str = "cpu",
+        backend: str = "auto",
+        onnx_path: str | None = None,
         layer_index: int = -1,
         layer_indices: list[int] | None = None,
         layer_weights: list[float] | None = None,
@@ -50,10 +52,16 @@ class KeyAttenExtractor:
                 raise ValueError("layer_weights requires layer_indices.")
             if len(layer_weights) != len(layer_indices):
                 raise ValueError("layer_weights must have the same length as layer_indices.")
+        if backend not in {"auto", "torch", "onnx"}:
+            raise ValueError("backend must be one of {'auto', 'torch', 'onnx'}.")
+        if backend == "onnx" and layer_indices is not None:
+            raise ValueError("ONNX backend currently supports only a single exported attention layer.")
 
         self.model = model
         self.language = language
         self.device = device
+        self.backend = backend
+        self.onnx_path = onnx_path
         self.layer_index = layer_index
         self.layer_indices = list(layer_indices) if layer_indices is not None else None
         self.layer_weights = list(layer_weights) if layer_weights is not None else None
@@ -182,7 +190,7 @@ class KeyAttenExtractor:
         else:
             scores_by_method = attention_word_scores(
                 words,
-                self.model_bundle,
+                self._get_model_bundle(),
                 layer_index=self.layer_index,
                 layer_indices=self.layer_indices,
                 layer_weights=self.layer_weights,
@@ -326,7 +334,14 @@ class KeyAttenExtractor:
 
     def _get_model_bundle(self) -> dict:
         if self.model_bundle is None:
-            self.model_bundle = build_model_bundle(self.model, self.device)
+            self.model_bundle = build_model_bundle(
+                self.model,
+                self.device,
+                backend=self.backend,
+                onnx_path=self.onnx_path,
+                layer_index=self.layer_index,
+                layer_indices=self.layer_indices,
+            )
         return self.model_bundle
 
     @staticmethod
@@ -348,6 +363,8 @@ def extract_keywords(
     method: str = "cls_attn",
     top_k: int = 10,
     device: str = "cpu",
+    backend: str = "auto",
+    onnx_path: str | None = None,
     idf_lookup: dict[str, float] | None = None,
     layer_index: int = -1,
 ) -> list[str]:
@@ -355,6 +372,8 @@ def extract_keywords(
         model=model,
         language=language,
         device=device,
+        backend=backend,
+        onnx_path=onnx_path,
         layer_index=layer_index,
     )
     return extractor.extract_keywords(

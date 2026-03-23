@@ -36,6 +36,12 @@
 推荐安装命令：
 
 ```bash
+pip install "keyatten[zh,lightweight]"
+```
+
+如果需要自己导出 ONNX attention 文件，再安装：
+
+```bash
 pip install "keyatten[inference,zh,lightweight]"
 ```
 
