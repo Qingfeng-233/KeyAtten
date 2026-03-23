@@ -95,6 +95,31 @@ results = ext.extract_keywords_batch(
 )
 ```
 
+### External Token Input
+
+```python
+keywords = ext.extract_keywords(
+    ["空天信息", "系统", "优化"],
+    pos_tags=["n", "n", "v"],
+    method="received_attn",
+)
+```
+
+### Domain Dictionary
+
+```python
+ext = KeyAttenExtractor(
+    model="thenlper/gte-small-zh",
+    language="zh",
+    user_dict=["空天信息", "星闪技术"],
+)
+
+keywords = ext.extract_keywords(
+    "空天信息系统优化方法",
+    method="received_attn",
+)
+```
+
 ### Convenience Function
 
 ```python
@@ -210,6 +235,7 @@ KeyAttenExtractor(
     device: str = "cpu",                # compute device
     backend: str = "auto",              # "auto" / "torch" / "onnx"
     onnx_path: str | None = None,       # ONNX attention file path
+    user_dict: str | list[str] | dict = None,  # domain dictionary path / term list / term config
     layer_index: int = -1,              # single layer index (-1 = last layer)
     layer_indices: list[int] = None,    # multi-layer indices
     layer_weights: list[float] = None,  # multi-layer weights
@@ -226,6 +252,12 @@ KeyAttenExtractor(
 | `fit_idf(texts)` | `dict[str, float]` |
 
 `WordWeight` fields: `word`, `index`, `weight`, `pos_tag`.
+
+Notes:
+
+- `extract_keywords` and `extract_word_weights` also accept pre-tokenized `list[str]`
+- when external tokens are provided, `pos_tags` is optional; Chinese defaults to `n`, English defaults to `eng`
+- `user_dict` accepts a dictionary file path, a term list, or mappings like `{term: tag}` / `{term: (freq, tag)}`
 
 ## Citation
 

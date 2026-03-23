@@ -35,6 +35,7 @@ class KeyAttenExtractor:
         device: str = "cpu",
         backend: str = "auto",
         onnx_path: str | None = None,
+        user_dict: str | Sequence[str] | dict[str, str | tuple[int | None, str | None]] | None = None,
         layer_index: int = -1,
         layer_indices: list[int] | None = None,
         layer_weights: list[float] | None = None,
@@ -62,6 +63,7 @@ class KeyAttenExtractor:
         self.device = device
         self.backend = backend
         self.onnx_path = onnx_path
+        self.user_dict = user_dict
         self.layer_index = layer_index
         self.layer_indices = list(layer_indices) if layer_indices is not None else None
         self.layer_weights = list(layer_weights) if layer_weights is not None else None
@@ -72,17 +74,18 @@ class KeyAttenExtractor:
 
     def extract_keywords(
         self,
-        text: str,
+        text: str | Sequence[str],
         method: str = "cls_attn",
         top_k: int = 10,
         idf_lookup: dict[str, float] | None = None,
+        pos_tags: Sequence[str] | None = None,
     ) -> list[str]:
         self._validate_method(method, allow_hybrid=True)
 
         if self.attn_merge and self.language.startswith("zh"):
-            return self._extract_keywords_with_merge(text, method, top_k, idf_lookup)
+            return self._extract_keywords_with_merge(text, method, top_k, idf_lookup, pos_tags=pos_tags)
 
-        words, pos_tags, candidates, candidate_starts, candidate_ends, token_counts = self._prepare_document(text)
+        words, pos_tags, candidates, candidate_starts, candidate_ends, token_counts = self._prepare_document(text, pos_tags=pos_tags)
         if not candidates:
             return []
 
@@ -105,13 +108,14 @@ class KeyAttenExtractor:
 
     def _extract_keywords_with_merge(
         self,
-        text: str,
+        text: str | Sequence[str],
         method: str,
         top_k: int,
         idf_lookup: dict[str, float] | None,
+        pos_tags: Sequence[str] | None = None,
     ) -> list[str]:
         # Step 1: coarse segmentation
-        words, pos_tags = segment_text(text, language=self.language)
+        words, pos_tags = self._resolve_document_words(text, pos_tags=pos_tags)
 
         # Step 2: forward pass — get word scores + raw attention map
         scores_by_method, attn_map, word_ids = attention_word_scores_with_raw(
@@ -164,11 +168,12 @@ class KeyAttenExtractor:
 
     def extract_word_weights(
         self,
-        text: str,
+        text: str | Sequence[str],
         method: str = "received_attn",
+        pos_tags: Sequence[str] | None = None,
     ) -> list[WordWeight]:
         self._validate_method(method, allow_hybrid=False)
-        words, pos_tags = segment_text(text, language=self.language)
+        words, pos_tags = self._resolve_document_words(text, pos_tags=pos_tags)
 
         if self.attn_merge and self.language.startswith("zh"):
             scores_by_method, attn_map, word_ids = attention_word_scores_with_raw(
@@ -207,30 +212,55 @@ class KeyAttenExtractor:
             for index, word in enumerate(words)
         ]
 
-    def fit_idf(self, texts: list[str]) -> dict[str, float]:
+    def fit_idf(
+        self,
+        texts: list[str | Sequence[str]],
+        pos_tags_batch: Sequence[Sequence[str] | None] | None = None,
+    ) -> dict[str, float]:
+        if pos_tags_batch is not None and len(pos_tags_batch) != len(texts):
+            raise ValueError("pos_tags_batch must have the same length as texts.")
         token_sets = []
-        for text in texts:
-            words, pos_tags = segment_text(text, language=self.language)
-            token_sets.append(token_counter(words, pos_tags, language=self.language).keys())
+        for index, text in enumerate(texts):
+            pos_tags = pos_tags_batch[index] if pos_tags_batch is not None else None
+            words, resolved_pos_tags = self._resolve_document_words(text, pos_tags=pos_tags)
+            token_sets.append(token_counter(words, resolved_pos_tags, language=self.language).keys())
         self.idf_lookup = inverse_document_frequency(token_sets)
         return dict(self.idf_lookup)
 
     def extract_keywords_batch(
         self,
-        texts: list[str],
+        texts: list[str | Sequence[str]],
         method: str = "cls_attn",
         top_k: int = 10,
         idf_lookup: dict[str, float] | None = None,
+        pos_tags_batch: Sequence[Sequence[str] | None] | None = None,
     ) -> list[list[str]]:
         self._validate_method(method, allow_hybrid=True)
         if not texts:
             return []
+        if pos_tags_batch is not None and len(pos_tags_batch) != len(texts):
+            raise ValueError("pos_tags_batch must have the same length as texts.")
 
         # attn_merge: fall back to per-document extraction (no batch optimization)
         if self.attn_merge and self.language.startswith("zh"):
-            return [self.extract_keywords(text, method, top_k, idf_lookup) for text in texts]
+            return [
+                self.extract_keywords(
+                    text,
+                    method=method,
+                    top_k=top_k,
+                    idf_lookup=idf_lookup,
+                    pos_tags=pos_tags_batch[index] if pos_tags_batch is not None else None,
+                )
+                for index, text in enumerate(texts)
+            ]
 
-        prepared = [self._prepare_document(text) for text in texts]
+        prepared = [
+            self._prepare_document(
+                text,
+                pos_tags=pos_tags_batch[index] if pos_tags_batch is not None else None,
+            )
+            for index, text in enumerate(texts)
+        ]
         batch_words = [item[0] for item in prepared]
         effective_layer_indices = self.layer_indices if self.layer_indices is not None else [self.layer_index]
         per_doc_layer_scores = batched_attention_word_scores(
@@ -283,14 +313,36 @@ class KeyAttenExtractor:
 
     def _prepare_document(
         self,
-        text: str,
+        text: str | Sequence[str],
+        pos_tags: Sequence[str] | None = None,
     ) -> tuple[list[str], list[str], list[Candidate], np.ndarray, np.ndarray, dict[str, float]]:
-        words, pos_tags = segment_text(text, language=self.language)
+        words, pos_tags = self._resolve_document_words(text, pos_tags=pos_tags)
         candidates = build_candidates(words, pos_tags, language=self.language)
         candidate_starts = np.fromiter((candidate.word_start for candidate in candidates), dtype=np.int32, count=len(candidates))
         candidate_ends = np.fromiter((candidate.word_end for candidate in candidates), dtype=np.int32, count=len(candidates))
         counts = dict(token_counter(words, pos_tags, language=self.language))
         return words, pos_tags, candidates, candidate_starts, candidate_ends, counts
+
+    def _resolve_document_words(
+        self,
+        text: str | Sequence[str],
+        pos_tags: Sequence[str] | None = None,
+    ) -> tuple[list[str], list[str]]:
+        if isinstance(text, str):
+            return segment_text(text, language=self.language, user_dict=self.user_dict)
+
+        words = [str(word) for word in text]
+        if any(not word.strip() for word in words):
+            raise ValueError("External token input must not contain empty tokens.")
+
+        if pos_tags is not None and len(pos_tags) != len(words):
+            raise ValueError("pos_tags must have the same length as words.")
+
+        if pos_tags is None:
+            default_pos = "eng" if self.language.startswith("en") else "n"
+            return words, [default_pos] * len(words)
+
+        return words, [str(tag) for tag in pos_tags]
 
     def _resolve_word_scores(
         self,
@@ -357,7 +409,7 @@ class KeyAttenExtractor:
 
 
 def extract_keywords(
-    text: str,
+    text: str | Sequence[str],
     model: str,
     language: str = "zh",
     method: str = "cls_attn",
@@ -365,8 +417,10 @@ def extract_keywords(
     device: str = "cpu",
     backend: str = "auto",
     onnx_path: str | None = None,
+    user_dict: str | Sequence[str] | dict[str, str | tuple[int | None, str | None]] | None = None,
     idf_lookup: dict[str, float] | None = None,
     layer_index: int = -1,
+    pos_tags: Sequence[str] | None = None,
 ) -> list[str]:
     extractor = KeyAttenExtractor(
         model=model,
@@ -374,6 +428,7 @@ def extract_keywords(
         device=device,
         backend=backend,
         onnx_path=onnx_path,
+        user_dict=user_dict,
         layer_index=layer_index,
     )
     return extractor.extract_keywords(
@@ -381,6 +436,7 @@ def extract_keywords(
         method=method,
         top_k=top_k,
         idf_lookup=idf_lookup,
+        pos_tags=pos_tags,
     )
 
 

@@ -95,6 +95,31 @@ results = ext.extract_keywords_batch(
 )
 ```
 
+### 外部分词输入
+
+```python
+keywords = ext.extract_keywords(
+    ["空天信息", "系统", "优化"],
+    pos_tags=["n", "n", "v"],
+    method="received_attn",
+)
+```
+
+### 领域词典
+
+```python
+ext = KeyAttenExtractor(
+    model="thenlper/gte-small-zh",
+    language="zh",
+    user_dict=["空天信息", "星闪技术"],
+)
+
+keywords = ext.extract_keywords(
+    "空天信息系统优化方法",
+    method="received_attn",
+)
+```
+
 ### 便捷函数
 
 ```python
@@ -210,6 +235,7 @@ KeyAttenExtractor(
     device: str = "cpu",                # 计算设备
     backend: str = "auto",              # "auto" / "torch" / "onnx"
     onnx_path: str | None = None,       # ONNX attention 文件路径
+    user_dict: str | list[str] | dict = None,  # 领域词典路径 / 术语列表 / 术语配置
     layer_index: int = -1,              # 单层索引（-1 = 最后一层）
     layer_indices: list[int] = None,    # 多层索引列表
     layer_weights: list[float] = None,  # 多层权重列表
@@ -226,6 +252,12 @@ KeyAttenExtractor(
 | `fit_idf(texts)` | `dict[str, float]` |
 
 `WordWeight` 包含字段：`word`、`index`、`weight`、`pos_tag`。
+
+说明：
+
+- `extract_keywords` / `extract_word_weights` 支持直接传入外部分词后的 `list[str]`
+- 这时可选传 `pos_tags`；若不传，中文默认按名词 `n`、英文默认按 `eng` 处理
+- `user_dict` 支持三种形式：词典文件路径、术语列表、`{term: tag}` / `{term: (freq, tag)}` 配置
 
 ## 引用
 

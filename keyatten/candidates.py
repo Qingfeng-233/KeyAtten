@@ -3,7 +3,8 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from typing import Sequence
+from pathlib import Path
+from typing import Mapping, Sequence
 
 import numpy as np
 
@@ -17,6 +18,8 @@ _BRACKET_RE = re.compile(r"[《\u300a](.+?)[》\u300b]")
 _JIEBA = None
 _PSEG = None
 _ENGLISH_STOP_WORDS = None
+_LOADED_USER_DICT_PATHS: set[str] = set()
+_REGISTERED_USER_TERMS: set[tuple[str, int | None, str | None]] = set()
 
 
 @dataclass(slots=True)
@@ -100,11 +103,56 @@ def _register_bracketed_terms(text: str) -> None:
             jieba.add_word(term, tag="nz")
 
 
-def segment_text(text: str, language: str = "zh") -> tuple[list[str], list[str]]:
+def _register_user_term(term: str, freq: int | None = None, tag: str | None = "nz") -> None:
+    normalized = term.strip()
+    if not normalized:
+        return
+    jieba, _ = _require_jieba()
+    key = (normalized, freq, tag)
+    if key in _REGISTERED_USER_TERMS:
+        return
+    jieba.add_word(normalized, freq=freq, tag=tag)
+    _REGISTERED_USER_TERMS.add(key)
+
+
+def apply_user_dictionary(
+    user_dict: str | Sequence[str] | Mapping[str, str | tuple[int | None, str | None]] | None,
+) -> None:
+    if user_dict is None:
+        return
+
+    if isinstance(user_dict, str):
+        dictionary_path = str(Path(user_dict).resolve())
+        if dictionary_path in _LOADED_USER_DICT_PATHS:
+            return
+        jieba, _ = _require_jieba()
+        jieba.load_userdict(dictionary_path)
+        _LOADED_USER_DICT_PATHS.add(dictionary_path)
+        return
+
+    if isinstance(user_dict, Mapping):
+        for term, spec in user_dict.items():
+            if isinstance(spec, tuple):
+                freq, tag = spec
+            else:
+                freq, tag = None, spec
+            _register_user_term(term, freq=freq, tag=tag or "nz")
+        return
+
+    for term in user_dict:
+        _register_user_term(str(term), tag="nz")
+
+
+def segment_text(
+    text: str,
+    language: str = "zh",
+    user_dict: str | Sequence[str] | Mapping[str, str | tuple[int | None, str | None]] | None = None,
+) -> tuple[list[str], list[str]]:
     if language.startswith("en"):
         words = EN_TOKEN_RE.findall(text)
         return words, ["eng"] * len(words)
 
+    apply_user_dictionary(user_dict)
     _, pseg = _require_jieba()
     _register_bracketed_terms(text)
     words: list[str] = []
