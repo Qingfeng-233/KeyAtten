@@ -4,14 +4,37 @@ import math
 from typing import Sequence
 
 import numpy as np
-import torch
-from transformers import AutoModel, AutoTokenizer
+
+try:
+    import torch
+except ImportError:
+    torch = None
+
+try:
+    from transformers import AutoModel, AutoTokenizer
+except ImportError:
+    AutoModel = None
+    AutoTokenizer = None
 
 
 ATTENTION_METHODS = ("cls_attn", "received_attn", "samrank", "fusion_attn")
 
 
+def _require_inference_dependencies() -> None:
+    missing: list[str] = []
+    if torch is None:
+        missing.append("torch>=2.0")
+    if AutoModel is None or AutoTokenizer is None:
+        missing.append("transformers>=4.30")
+    if missing:
+        raise ImportError(
+            "Attention extraction requires optional dependencies: "
+            f"{', '.join(missing)}. Install with `pip install \"keyatten[inference]\"`."
+        )
+
+
 def build_model_bundle(model_name: str, device: str) -> dict:
+    _require_inference_dependencies()
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
     try:
         model = AutoModel.from_pretrained(model_name, output_attentions=True, attn_implementation="eager")

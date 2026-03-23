@@ -20,7 +20,21 @@ Evaluated on 7 public datasets against 14 methods: +67% F1@10 over traditional b
 pip install keyatten
 ```
 
-Dependencies: `torch>=2.0` `transformers>=4.30` `jieba` `scikit-learn` `nltk` `numpy`
+Minimal install only includes `numpy` so importing the package does not pull the full ML stack by default.
+
+```bash
+pip install "keyatten[inference,zh]"   # Chinese keyword extraction
+pip install "keyatten[inference,en]"   # English keyword extraction
+pip install "keyatten[full]"           # All optional dependencies
+```
+
+Optional dependency groups:
+
+- `inference`: `torch>=2.0`, `transformers>=4.30`
+- `zh`: `jieba>=0.42`
+- `en`: `scikit-learn>=1.0`, `nltk>=3.8`
+
+If you call extraction APIs without the required extras installed, KeyAtten now raises a direct install hint instead of failing during `import keyatten`.
 
 ## Quick Start
 

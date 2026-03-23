@@ -20,7 +20,21 @@
 pip install keyatten
 ```
 
-依赖：`torch>=2.0` `transformers>=4.30` `jieba` `scikit-learn` `nltk` `numpy`
+默认安装现在只包含 `numpy`，不会在 `import keyatten` 时顺带拉起整套重量级推理依赖。
+
+```bash
+pip install "keyatten[inference,zh]"   # 中文关键词提取
+pip install "keyatten[inference,en]"   # 英文关键词提取
+pip install "keyatten[full]"           # 安装全部可选依赖
+```
+
+可选依赖分组：
+
+- `inference`: `torch>=2.0`、`transformers>=4.30`
+- `zh`: `jieba>=0.42`
+- `en`: `scikit-learn>=1.0`、`nltk>=3.8`
+
+如果缺少对应 extras 就直接调用提取接口，KeyAtten 现在会给出明确安装提示，而不是在 `import keyatten` 阶段就失败。
 
 ## 快速开始
 

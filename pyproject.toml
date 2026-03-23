@@ -13,9 +13,24 @@ authors = [
     { name = "蒋林浩" },
 ]
 dependencies = [
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+inference = [
     "torch>=2.0",
     "transformers>=4.30",
-    "numpy>=1.24",
+]
+zh = [
+    "jieba>=0.42",
+]
+en = [
+    "scikit-learn>=1.0",
+    "nltk>=3.8",
+]
+full = [
+    "torch>=2.0",
+    "transformers>=4.30",
     "jieba>=0.42",
     "scikit-learn>=1.0",
     "nltk>=3.8",

@@ -5,10 +5,7 @@ import re
 from dataclasses import dataclass
 from typing import Sequence
 
-import jieba
-import jieba.posseg as pseg
 import numpy as np
-from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
 
 from .utils import normalize_phrase
 
@@ -17,6 +14,9 @@ VALID_POS_PREFIXES = ("n", "eng", "v")
 PUNCT_RE = re.compile(r"^[\W_]+$", re.UNICODE)
 EN_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
 _BRACKET_RE = re.compile(r"[《\u300a](.+?)[》\u300b]")
+_JIEBA = None
+_PSEG = None
+_ENGLISH_STOP_WORDS = None
 
 
 @dataclass(slots=True)
@@ -32,6 +32,42 @@ class Candidate:
     text: str
     word_start: int
     word_end: int
+
+
+def _require_jieba():
+    global _JIEBA, _PSEG
+    if _JIEBA is not None and _PSEG is not None:
+        return _JIEBA, _PSEG
+
+    try:
+        import jieba
+        import jieba.posseg as pseg
+    except ImportError as exc:
+        raise ImportError(
+            "Chinese tokenization requires optional dependency `jieba>=0.42`. "
+            "Install with `pip install \"keyatten[zh]\"`."
+        ) from exc
+
+    _JIEBA = jieba
+    _PSEG = pseg
+    return _JIEBA, _PSEG
+
+
+def _english_stop_words() -> frozenset[str]:
+    global _ENGLISH_STOP_WORDS
+    if _ENGLISH_STOP_WORDS is not None:
+        return _ENGLISH_STOP_WORDS
+
+    try:
+        from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
+    except ImportError as exc:
+        raise ImportError(
+            "English token filtering requires optional dependency `scikit-learn>=1.0`. "
+            "Install with `pip install \"keyatten[en]\"`."
+        ) from exc
+
+    _ENGLISH_STOP_WORDS = frozenset(ENGLISH_STOP_WORDS)
+    return _ENGLISH_STOP_WORDS
 
 
 def is_valid_token(word: str, pos_tag: str) -> bool:
@@ -50,13 +86,14 @@ def is_valid_english_token(word: str) -> bool:
     lowered = word.strip().lower()
     if len(lowered) <= 1:
         return False
-    if lowered in ENGLISH_STOP_WORDS:
+    if lowered in _english_stop_words():
         return False
     return bool(re.search(r"[a-z]", lowered))
 
 
 def _register_bracketed_terms(text: str) -> None:
     """自动将书名号《》内的内容注册到 jieba 词典，词性标记为专有名词。"""
+    jieba, _ = _require_jieba()
     for match in _BRACKET_RE.finditer(text):
         term = match.group(1).strip()
         if term:
@@ -68,6 +105,7 @@ def segment_text(text: str, language: str = "zh") -> tuple[list[str], list[str]]
         words = EN_TOKEN_RE.findall(text)
         return words, ["eng"] * len(words)
 
+    _, pseg = _require_jieba()
     _register_bracketed_terms(text)
     words: list[str] = []
     pos_tags: list[str] = []

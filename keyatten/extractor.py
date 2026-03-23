@@ -59,7 +59,7 @@ class KeyAttenExtractor:
         self.layer_weights = list(layer_weights) if layer_weights is not None else None
         self.attn_merge = attn_merge
         self.merge_threshold = merge_threshold
-        self.model_bundle = build_model_bundle(model, device)
+        self.model_bundle: dict | None = None
         self.idf_lookup: dict[str, float] | None = None
 
     def extract_keywords(
@@ -108,7 +108,7 @@ class KeyAttenExtractor:
         # Step 2: forward pass — get word scores + raw attention map
         scores_by_method, attn_map, word_ids = attention_word_scores_with_raw(
             words,
-            self.model_bundle,
+            self._get_model_bundle(),
             layer_index=self.layer_index,
             layer_indices=self.layer_indices,
             layer_weights=self.layer_weights,
@@ -165,7 +165,7 @@ class KeyAttenExtractor:
         if self.attn_merge and self.language.startswith("zh"):
             scores_by_method, attn_map, word_ids = attention_word_scores_with_raw(
                 words,
-                self.model_bundle,
+                self._get_model_bundle(),
                 layer_index=self.layer_index,
                 layer_indices=self.layer_indices,
                 layer_weights=self.layer_weights,
@@ -227,7 +227,7 @@ class KeyAttenExtractor:
         effective_layer_indices = self.layer_indices if self.layer_indices is not None else [self.layer_index]
         per_doc_layer_scores = batched_attention_word_scores(
             batch_words,
-            self.model_bundle,
+            self._get_model_bundle(),
             layer_indices=effective_layer_indices,
         )
 
@@ -295,7 +295,7 @@ class KeyAttenExtractor:
         self._validate_method(method, allow_hybrid=True)
         scores_by_method = attention_word_scores(
             words,
-            self.model_bundle,
+            self._get_model_bundle(),
             layer_index=self.layer_index,
             layer_indices=self.layer_indices,
             layer_weights=self.layer_weights,
@@ -323,6 +323,11 @@ class KeyAttenExtractor:
         if lookup is None:
             raise ValueError("IDF-based methods require idf_lookup or a prior fit_idf() call.")
         return lookup
+
+    def _get_model_bundle(self) -> dict:
+        if self.model_bundle is None:
+            self.model_bundle = build_model_bundle(self.model, self.device)
+        return self.model_bundle
 
     @staticmethod
     def _validate_method(
