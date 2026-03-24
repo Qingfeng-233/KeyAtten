@@ -6,6 +6,7 @@ import numpy as np
 
 from .attention import (
     ATTENTION_METHODS,
+    DEFAULT_ZH_CAUSAL_INSTRUCTION_PREFIX,
     attention_word_scores,
     attention_word_scores_with_raw,
     batched_attention_word_scores,
@@ -41,6 +42,7 @@ class KeyAttenExtractor:
         layer_weights: list[float] | None = None,
         attn_merge: bool = False,
         merge_threshold: float = 0.3,
+        instruction_prefix: str | None = None,
     ) -> None:
         if not model:
             raise ValueError("model is required.")
@@ -69,6 +71,7 @@ class KeyAttenExtractor:
         self.layer_weights = list(layer_weights) if layer_weights is not None else None
         self.attn_merge = attn_merge
         self.merge_threshold = merge_threshold
+        self.instruction_prefix = instruction_prefix
         self.model_bundle: dict | None = None
         self.idf_lookup: dict[str, float] | None = None
 
@@ -82,7 +85,7 @@ class KeyAttenExtractor:
     ) -> list[str]:
         self._validate_method(method, allow_hybrid=True)
 
-        if self.attn_merge and self.language.startswith("zh"):
+        if self.attn_merge and self.language.startswith("zh") and self._resolve_instruction_prefix() is None:
             return self._extract_keywords_with_merge(text, method, top_k, idf_lookup, pos_tags=pos_tags)
 
         words, pos_tags, candidates, candidate_starts, candidate_ends, token_counts = self._prepare_document(text, pos_tags=pos_tags)
@@ -124,6 +127,8 @@ class KeyAttenExtractor:
             layer_index=self.layer_index,
             layer_indices=self.layer_indices,
             layer_weights=self.layer_weights,
+            pos_tags=pos_tags,
+            language=self.language,
         )
 
         # Step 3: merge single chars using attention
@@ -175,13 +180,15 @@ class KeyAttenExtractor:
         self._validate_method(method, allow_hybrid=False)
         words, pos_tags = self._resolve_document_words(text, pos_tags=pos_tags)
 
-        if self.attn_merge and self.language.startswith("zh"):
+        if self.attn_merge and self.language.startswith("zh") and self._resolve_instruction_prefix() is None:
             scores_by_method, attn_map, word_ids = attention_word_scores_with_raw(
                 words,
                 self._get_model_bundle(),
                 layer_index=self.layer_index,
                 layer_indices=self.layer_indices,
                 layer_weights=self.layer_weights,
+                pos_tags=pos_tags,
+                language=self.language,
             )
             merged_words, merged_pos, merge_map, changed = merge_single_chars(
                 list(words), list(pos_tags), attn_map, list(word_ids), self.merge_threshold,
@@ -199,6 +206,9 @@ class KeyAttenExtractor:
                 layer_index=self.layer_index,
                 layer_indices=self.layer_indices,
                 layer_weights=self.layer_weights,
+                pos_tags=pos_tags,
+                language=self.language,
+                instruction_prefix=self._resolve_instruction_prefix(),
             )
             word_scores = scores_by_method[method]
 
@@ -242,7 +252,7 @@ class KeyAttenExtractor:
             raise ValueError("pos_tags_batch must have the same length as texts.")
 
         # attn_merge: fall back to per-document extraction (no batch optimization)
-        if self.attn_merge and self.language.startswith("zh"):
+        if self.attn_merge and self.language.startswith("zh") and self._resolve_instruction_prefix() is None:
             return [
                 self.extract_keywords(
                     text,
@@ -262,11 +272,15 @@ class KeyAttenExtractor:
             for index, text in enumerate(texts)
         ]
         batch_words = [item[0] for item in prepared]
+        batch_pos_tags_list = [item[1] for item in prepared]
         effective_layer_indices = self.layer_indices if self.layer_indices is not None else [self.layer_index]
         per_doc_layer_scores = batched_attention_word_scores(
             batch_words,
             self._get_model_bundle(),
             layer_indices=effective_layer_indices,
+            batch_pos_tags=batch_pos_tags_list,
+            language=self.language,
+            instruction_prefix=self._resolve_instruction_prefix(),
         )
 
         results: list[list[str]] = []
@@ -359,6 +373,9 @@ class KeyAttenExtractor:
             layer_index=self.layer_index,
             layer_indices=self.layer_indices,
             layer_weights=self.layer_weights,
+            pos_tags=pos_tags,
+            language=self.language,
+            instruction_prefix=self._resolve_instruction_prefix(),
         )
         base_method = method.removesuffix("_idf")
         word_scores = scores_by_method[base_method]
@@ -396,6 +413,14 @@ class KeyAttenExtractor:
             )
         return self.model_bundle
 
+    def _resolve_instruction_prefix(self) -> str | None:
+        if self.instruction_prefix is not None:
+            prefix = self.instruction_prefix.strip()
+            return prefix or None
+        if self._get_model_bundle().get("is_causal") and self.language.startswith("zh"):
+            return DEFAULT_ZH_CAUSAL_INSTRUCTION_PREFIX
+        return None
+
     @staticmethod
     def _validate_method(
         method: str,
@@ -421,6 +446,7 @@ def extract_keywords(
     idf_lookup: dict[str, float] | None = None,
     layer_index: int = -1,
     pos_tags: Sequence[str] | None = None,
+    instruction_prefix: str | None = None,
 ) -> list[str]:
     extractor = KeyAttenExtractor(
         model=model,
@@ -430,6 +456,7 @@ def extract_keywords(
         onnx_path=onnx_path,
         user_dict=user_dict,
         layer_index=layer_index,
+        instruction_prefix=instruction_prefix,
     )
     return extractor.extract_keywords(
         text=text,

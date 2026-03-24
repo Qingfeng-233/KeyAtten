@@ -7,6 +7,8 @@ from typing import Sequence
 
 import numpy as np
 
+from .candidates import is_valid_english_token, is_valid_token, segment_text
+
 try:
     import torch
 except ImportError:
@@ -29,12 +31,13 @@ except ImportError:
     Tokenizer = None
 
 
-ATTENTION_METHODS = ("cls_attn", "received_attn", "samrank", "fusion_attn")
+ATTENTION_METHODS = ("cls_attn", "received_attn", "samrank", "fusion_attn", "voted_attn")
 _ONNX_PREFERRED_NAMES = (
     "attention_last.onnx",
     "gte_small_zh_attention.onnx",
     "model.onnx",
 )
+DEFAULT_ZH_CAUSAL_INSTRUCTION_PREFIX = "核心关键词、关键实体、主题："
 
 
 def _require_inference_dependencies() -> None:
@@ -136,6 +139,26 @@ def _select_ort_providers(device: str) -> list[str]:
     return ["CPUExecutionProvider"]
 
 
+def _detect_is_causal(config) -> bool:
+    """Detect whether a model uses causal (decoder-only) attention from its config."""
+    if getattr(config, "is_decoder", False):
+        return True
+    architectures = getattr(config, "architectures", None) or []
+    return any("CausalLM" in arch for arch in architectures)
+
+
+def _detect_is_causal_from_json(config_path: Path) -> bool:
+    """Detect causal model from a config.json file on disk."""
+    if not config_path.is_file():
+        return False
+    with config_path.open("r", encoding="utf-8") as handle:
+        config = json.load(handle)
+    if config.get("is_decoder", False):
+        return True
+    architectures = config.get("architectures", [])
+    return any("CausalLM" in arch for arch in architectures)
+
+
 def build_model_bundle(
     model_name: str,
     device: str,
@@ -166,6 +189,7 @@ def build_model_bundle(
         model_dir, resolved_onnx = _resolve_onnx_artifacts(model_name, onnx_path, layer_index)
         tokenizer, max_length = _load_tokenizer_metadata(model_dir)
         session = ort.InferenceSession(str(resolved_onnx), providers=_select_ort_providers(device))
+        is_causal = _detect_is_causal_from_json(model_dir / "config.json")
         return {
             "backend": "onnx",
             "tokenizer": tokenizer,
@@ -175,6 +199,7 @@ def build_model_bundle(
             "model_dir": str(model_dir),
             "max_length": max_length,
             "layer_index": layer_index,
+            "is_causal": is_causal,
         }
 
     _require_inference_dependencies()
@@ -185,7 +210,16 @@ def build_model_bundle(
         model = AutoModel.from_pretrained(model_name, output_attentions=True)
     model.to(device)
     model.eval()
-    return {"backend": "torch", "tokenizer": tokenizer, "model": model, "device": device}
+    is_causal = _detect_is_causal(model.config)
+    max_length = int(getattr(model.config, "max_position_embeddings", 512))
+    return {
+        "backend": "torch",
+        "tokenizer": tokenizer,
+        "model": model,
+        "device": device,
+        "is_causal": is_causal,
+        "max_length": max_length,
+    }
 
 
 def normalize_array(values: np.ndarray) -> np.ndarray:
@@ -221,11 +255,103 @@ def _resolve_layer_index(layer_index: int, layer_count: int) -> int:
     return resolved
 
 
+def _build_content_mask(
+    word_ids: list[int | None],
+    words: Sequence[str],
+    pos_tags: Sequence[str],
+    language: str,
+) -> np.ndarray:
+    """Build a boolean mask where True = content token, False = noise/special token."""
+    n_tokens = len(word_ids)
+    mask = np.zeros(n_tokens, dtype=bool)
+    for token_index, word_id in enumerate(word_ids):
+        if word_id is None or word_id < 0 or word_id >= len(words):
+            continue
+        if language.startswith("en"):
+            if is_valid_english_token(words[word_id]):
+                mask[token_index] = True
+        else:
+            if is_valid_token(words[word_id], pos_tags[word_id]):
+                mask[token_index] = True
+    return mask
+
+
+def _tokenize_instruction_prefix(
+    instruction_prefix: str | None,
+    language: str,
+) -> tuple[list[str], list[str]]:
+    prefix = (instruction_prefix or "").strip()
+    if not prefix:
+        return [], []
+    return segment_text(prefix, language=language)
+
+
+def _scores_from_attention_map_causal(
+    word_ids: list[int | None],
+    attention_map: np.ndarray,
+    word_count: int,
+    content_mask: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Compute attention scores adapted for decoder (causal) models.
+
+    Only cls_attn is replaced with content-masked last-token attention.
+    received_attn and samrank keep the original computation — the candidate
+    filtering pipeline already handles noise in these signals.
+    voted_attn is a new method: content-masked, row-renormalized, position-normalized.
+    """
+    n_tokens = attention_map.shape[0]
+
+    # --- cls_attn: content-masked last-token attention ---
+    cls_scores = attention_map[-1].copy()
+    cls_scores[~content_mask] = 0.0
+    row_sum = cls_scores.sum()
+    if row_sum > 1e-10:
+        cls_scores /= row_sum
+
+    # --- received_attn: original computation (no masking) ---
+    received_scores = attention_map.sum(axis=0)
+
+    # --- samrank: original computation on original received_attn ---
+    global_scores = received_scores.copy()
+    redistributed = attention_map * global_scores[None, :]
+    col_sums = redistributed.sum(axis=0, keepdims=True) + 1e-10
+    redistributed = np.divide(redistributed, col_sums, out=np.zeros_like(redistributed), where=col_sums > 0.0)
+    proportional_scores = redistributed.sum(axis=1)
+    samrank_scores = global_scores + proportional_scores
+
+    # --- fusion_attn: new cls × original received ---
+    fusion_scores = normalize_array(cls_scores) * normalize_array(received_scores)
+
+    # --- voted_attn: content-masked, row-renormalized, position-normalized ---
+    masked_attn = attention_map.copy()
+    masked_attn[:, ~content_mask] = 0.0
+    row_sums = masked_attn.sum(axis=1, keepdims=True)
+    row_sums = np.where(row_sums > 1e-10, row_sums, 1.0)
+    masked_attn /= row_sums
+    voted_scores = masked_attn.sum(axis=0)
+    voter_count = np.arange(n_tokens, 0, -1, dtype=np.float32)
+    voted_scores /= voter_count
+
+    return {
+        "cls_attn": _aggregate_subwords_to_words(word_ids, cls_scores, word_count),
+        "received_attn": _aggregate_subwords_to_words(word_ids, received_scores, word_count),
+        "samrank": _aggregate_subwords_to_words(word_ids, samrank_scores, word_count),
+        "fusion_attn": _aggregate_subwords_to_words(word_ids, fusion_scores, word_count),
+        "voted_attn": _aggregate_subwords_to_words(word_ids, voted_scores, word_count),
+    }
+
+
 def _scores_from_attention_map(
     word_ids: list[int | None],
     attention_map: np.ndarray,
     word_count: int,
+    *,
+    is_causal: bool = False,
+    content_mask: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
+    if is_causal and content_mask is not None:
+        return _scores_from_attention_map_causal(word_ids, attention_map, word_count, content_mask)
+
     cls_scores = attention_map[0]
     received_scores = attention_map.sum(axis=0)
 
@@ -237,11 +363,17 @@ def _scores_from_attention_map(
     samrank_scores = global_scores + proportional_scores
     fusion_scores = normalize_array(cls_scores) * normalize_array(received_scores)
 
+    # --- voted_attn: position-normalized received (encoder: no content mask needed) ---
+    n_tokens = attention_map.shape[0]
+    voter_count = np.arange(n_tokens, 0, -1, dtype=np.float32)
+    voted_scores = received_scores / voter_count
+
     return {
         "cls_attn": _aggregate_subwords_to_words(word_ids, cls_scores, word_count),
         "received_attn": _aggregate_subwords_to_words(word_ids, received_scores, word_count),
         "samrank": _aggregate_subwords_to_words(word_ids, samrank_scores, word_count),
         "fusion_attn": _aggregate_subwords_to_words(word_ids, fusion_scores, word_count),
+        "voted_attn": _aggregate_subwords_to_words(word_ids, voted_scores, word_count),
     }
 
 
@@ -314,16 +446,31 @@ def _batched_attention_word_scores_onnx(
     model_bundle: dict,
     layer_indices: Sequence[int],
     batch_size: int = 4,
+    *,
+    batch_pos_tags: Sequence[Sequence[str]] | None = None,
+    language: str = "zh",
+    instruction_prefix: str | None = None,
 ) -> list[dict[int, dict[str, np.ndarray]]]:
     _validate_onnx_layer_request(model_bundle, layer_indices)
     tokenizer = model_bundle["tokenizer"]
     session = model_bundle["session"]
     max_length = int(model_bundle["max_length"])
     output_name = session.get_outputs()[0].name
+    is_causal = model_bundle.get("is_causal", False)
+    prefix_words, prefix_pos_tags = _tokenize_instruction_prefix(instruction_prefix, language)
 
     results: list[dict[int, dict[str, np.ndarray]]] = []
     for start in range(0, len(batch_words), batch_size):
-        word_batch = [list(words) for words in batch_words[start : start + batch_size]]
+        content_word_batch = [list(words) for words in batch_words[start : start + batch_size]]
+        pos_tag_batch = (
+            [list(pt) for pt in batch_pos_tags[start : start + batch_size]]
+            if batch_pos_tags is not None
+            else None
+        )
+        word_batch = [prefix_words + words for words in content_word_batch]
+        combined_pos_tag_batch = None
+        if pos_tag_batch is not None:
+            combined_pos_tag_batch = [prefix_pos_tags + pos_tags for pos_tags in pos_tag_batch]
         input_ids, attention_mask, word_ids_per_item, valid_token_counts = _encode_words_batch_onnx(
             word_batch,
             tokenizer,
@@ -338,13 +485,25 @@ def _batched_attention_word_scores_onnx(
         )
         attention_batch = outputs[0]
 
+        prefix_word_count = len(prefix_words)
         for item_index, words in enumerate(word_batch):
             valid_token_count = valid_token_counts[item_index]
             valid_word_ids = word_ids_per_item[item_index][:valid_token_count]
             attention_map = attention_batch[item_index][:valid_token_count, :valid_token_count].astype(np.float32, copy=False)
+            content_mask = None
+            if is_causal and combined_pos_tag_batch is not None:
+                content_mask = _build_content_mask(valid_word_ids, words, combined_pos_tag_batch[item_index], language)
+            combined_scores = _scores_from_attention_map(
+                valid_word_ids, attention_map, len(words),
+                is_causal=is_causal, content_mask=content_mask,
+            )
+            content_word_count = len(content_word_batch[item_index])
             results.append(
                 {
-                    layer_indices[0]: _scores_from_attention_map(valid_word_ids, attention_map, len(words)),
+                    layer_indices[0]: {
+                        method_name: method_scores[prefix_word_count : prefix_word_count + content_word_count]
+                        for method_name, method_scores in combined_scores.items()
+                    },
                 }
             )
 
@@ -356,6 +515,10 @@ def batched_attention_word_scores(
     model_bundle: dict,
     layer_indices: Sequence[int],
     batch_size: int = 4,
+    *,
+    batch_pos_tags: Sequence[Sequence[str]] | None = None,
+    language: str = "zh",
+    instruction_prefix: str | None = None,
 ) -> list[dict[int, dict[str, np.ndarray]]]:
     if not batch_words:
         return []
@@ -366,21 +529,36 @@ def batched_attention_word_scores(
             model_bundle,
             layer_indices=layer_indices,
             batch_size=batch_size,
+            batch_pos_tags=batch_pos_tags,
+            language=language,
+            instruction_prefix=instruction_prefix,
         )
 
     tokenizer = model_bundle["tokenizer"]
     model = model_bundle["model"]
     device = model_bundle["device"]
+    is_causal = model_bundle.get("is_causal", False)
+    max_length = int(model_bundle.get("max_length", 512))
+    prefix_words, prefix_pos_tags = _tokenize_instruction_prefix(instruction_prefix, language)
 
     results: list[dict[int, dict[str, np.ndarray]]] = []
     for start in range(0, len(batch_words), batch_size):
-        word_batch = [list(words) for words in batch_words[start : start + batch_size]]
+        content_word_batch = [list(words) for words in batch_words[start : start + batch_size]]
+        pos_tag_batch = (
+            [list(pt) for pt in batch_pos_tags[start : start + batch_size]]
+            if batch_pos_tags is not None
+            else None
+        )
+        word_batch = [prefix_words + words for words in content_word_batch]
+        combined_pos_tag_batch = None
+        if pos_tag_batch is not None:
+            combined_pos_tag_batch = [prefix_pos_tags + pos_tags for pos_tags in pos_tag_batch]
         encoded = tokenizer(
             word_batch,
             is_split_into_words=True,
             padding=True,
             truncation=True,
-            max_length=512,
+            max_length=max_length,
             return_tensors="pt",
         )
         word_ids_per_item = [encoded.word_ids(batch_index=index) for index in range(len(word_batch))]
@@ -396,13 +574,25 @@ def batched_attention_word_scores(
             for layer_index, resolved_index in resolved_indices.items()
         }
 
+        prefix_word_count = len(prefix_words)
         for item_index, words in enumerate(word_batch):
             per_item_scores: dict[int, dict[str, np.ndarray]] = {}
             valid_token_count = int(encoded["attention_mask"][item_index].sum().item())
             valid_word_ids = word_ids_per_item[item_index][:valid_token_count]
+            content_mask = None
+            if is_causal and combined_pos_tag_batch is not None:
+                content_mask = _build_content_mask(valid_word_ids, words, combined_pos_tag_batch[item_index], language)
+            content_word_count = len(content_word_batch[item_index])
             for layer_index in layer_indices:
                 attention_map = attention_by_layer[layer_index][item_index][:valid_token_count, :valid_token_count]
-                per_item_scores[layer_index] = _scores_from_attention_map(valid_word_ids, attention_map, len(words))
+                combined_scores = _scores_from_attention_map(
+                    valid_word_ids, attention_map, len(words),
+                    is_causal=is_causal, content_mask=content_mask,
+                )
+                per_item_scores[layer_index] = {
+                    method_name: method_scores[prefix_word_count : prefix_word_count + content_word_count]
+                    for method_name, method_scores in combined_scores.items()
+                }
             results.append(per_item_scores)
 
     return results
@@ -414,6 +604,10 @@ def attention_word_scores(
     layer_index: int = -1,
     layer_indices: Sequence[int] | None = None,
     layer_weights: Sequence[float] | None = None,
+    *,
+    pos_tags: Sequence[str] | None = None,
+    language: str = "zh",
+    instruction_prefix: str | None = None,
 ) -> dict[str, np.ndarray]:
     effective_layer_indices = list(layer_indices) if layer_indices else [layer_index]
     batched_scores = batched_attention_word_scores(
@@ -421,6 +615,9 @@ def attention_word_scores(
         model_bundle,
         layer_indices=effective_layer_indices,
         batch_size=1,
+        batch_pos_tags=[list(pos_tags)] if pos_tags is not None else None,
+        language=language,
+        instruction_prefix=instruction_prefix,
     )
     if not batched_scores:
         return {}
@@ -434,6 +631,9 @@ def attention_word_scores_with_raw(
     layer_index: int = -1,
     layer_indices: Sequence[int] | None = None,
     layer_weights: Sequence[float] | None = None,
+    *,
+    pos_tags: Sequence[str] | None = None,
+    language: str = "zh",
 ) -> tuple[dict[str, np.ndarray], np.ndarray, list[int | None]]:
     """Like attention_word_scores but also returns the token-level attention map and word_ids.
 
@@ -444,6 +644,7 @@ def attention_word_scores_with_raw(
         - word_ids: token-to-word mapping from the tokenizer
     """
     effective_layer_indices = list(layer_indices) if layer_indices else [layer_index]
+    is_causal = model_bundle.get("is_causal", False)
 
     if model_bundle.get("backend") == "onnx":
         _validate_onnx_layer_request(model_bundle, effective_layer_indices)
@@ -467,19 +668,26 @@ def attention_word_scores_with_raw(
         valid_token_count = valid_token_counts[0]
         valid_word_ids = word_ids_per_item[0][:valid_token_count]
         raw_attention_map = outputs[0][0][:valid_token_count, :valid_token_count].astype(np.float32, copy=False)
-        scores_by_method = _scores_from_attention_map(valid_word_ids, raw_attention_map, len(words))
+        content_mask = None
+        if is_causal and pos_tags is not None:
+            content_mask = _build_content_mask(valid_word_ids, words, pos_tags, language)
+        scores_by_method = _scores_from_attention_map(
+            valid_word_ids, raw_attention_map, len(words),
+            is_causal=is_causal, content_mask=content_mask,
+        )
         return scores_by_method, raw_attention_map, valid_word_ids
 
     tokenizer = model_bundle["tokenizer"]
     model = model_bundle["model"]
     device = model_bundle["device"]
+    max_length = int(model_bundle.get("max_length", 512))
 
     encoded = tokenizer(
         [list(words)],
         is_split_into_words=True,
         padding=False,
         truncation=True,
-        max_length=512,
+        max_length=max_length,
         return_tensors="pt",
     )
     word_ids = encoded.word_ids(batch_index=0)
@@ -492,6 +700,10 @@ def attention_word_scores_with_raw(
     valid_token_count = int(encoded["attention_mask"][0].sum().item())
     valid_word_ids = word_ids[:valid_token_count]
 
+    content_mask = None
+    if is_causal and pos_tags is not None:
+        content_mask = _build_content_mask(valid_word_ids, words, pos_tags, language)
+
     # Use last effective layer for the raw attention map
     resolved_last = _resolve_layer_index(effective_layer_indices[-1], layer_count)
     raw_attention_map = outputs.attentions[resolved_last].mean(dim=1)[0][:valid_token_count, :valid_token_count].detach().cpu().numpy()
@@ -501,7 +713,10 @@ def attention_word_scores_with_raw(
     for li in effective_layer_indices:
         resolved = _resolve_layer_index(li, layer_count)
         attn_map = outputs.attentions[resolved].mean(dim=1)[0][:valid_token_count, :valid_token_count].detach().cpu().numpy()
-        per_layer_scores.append(_scores_from_attention_map(valid_word_ids, attn_map, len(words)))
+        per_layer_scores.append(_scores_from_attention_map(
+            valid_word_ids, attn_map, len(words),
+            is_causal=is_causal, content_mask=content_mask,
+        ))
 
     scores_by_method = _aggregate_layer_word_scores(per_layer_scores, layer_weights=layer_weights)
     return scores_by_method, raw_attention_map, valid_word_ids
