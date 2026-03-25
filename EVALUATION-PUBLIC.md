@@ -1,7 +1,7 @@
 # KeyAtten: Unified Evaluation of Attention-Based Keyword Extraction
 
 > **Version**: V2
-> **Date**: 2026-03-22
+> **Date**: 2026-03-25
 > **Author**: Linhao Jiang
 
 ---
@@ -11,6 +11,17 @@
 This project presents a unified evaluation framework for attention-based keyword extraction, covering Chinese and English, short and long documents, and both Encoder and Decoder-only architectures. 14 methods were systematically compared across 7 public datasets.
 
 KeyAtten provides 4 pure attention methods (`cls_attn`, `received_attn`, `samrank`, `fusion_attn`) and their IDF hybrid variants. The `samrank` ranking formula is referenced from [Kang & Shin (2023, EMNLP)](https://doi.org/10.18653/v1/2023.emnlp-main.630). The other methods (`cls_attn`, `received_attn`, `fusion_attn`) and all `_idf` hybrid strategies are original to this project.
+
+### 2026-03-25 Update
+
+- The only stable decoder-side gain from the latest Qwen3 study is the causal adaptation itself: last-token anchor, content masking, automatic causal detection, and middle-upper layer selection.
+- This decoder-only adaptation has now been landed in the main library.
+- A shortlist-only nested-phrase de-dup post-processing option is now available in the main library for `top_k<=5`; it is not part of the default `@10` evaluation path.
+- Latest stable 100-document decoder-only results with `Qwen/Qwen3-Embedding-0.6B`:
+  - `csl_test`: `received_attn_idf@layer_21 = 0.1630`
+  - `shencecup_labeled`: `fusion_attn_idf@layer_21 = 0.2718`
+- Experimental branches such as `excess_attn`, head-weighting, rise score, attention-gated candidates, and true bidirectional monkey-patches are not promoted to the default algorithm.
+- Rollout summary: [benchmark/decoder-only-rollout-summary.md](./benchmark/decoder-only-rollout-summary.md)
 
 ### Key Findings
 
@@ -23,8 +34,9 @@ KeyAtten provides 4 pure attention methods (`cls_attn`, `received_attn`, `samran
 ### Release Position
 
 - The default release model is `gte-small-zh`
-- The default release methods are encoder-side `received_attn`, `samrank`, and their `_idf` hybrids
-- Decoder-only and larger embedding model results are retained as exploratory evidence, not the default production path
+- The default release method is `received_attn`, with `_idf` variants as the main corpus-aware route
+- `gte-small-zh + ONNX Runtime` remains the lightweight default production path
+- Decoder-only causal adaptation is now part of the main library, but the historical tables below remain a V2 benchmark snapshot
 - The lightweight deployment route is `gte-small-zh + ONNX Runtime`
 
 ---

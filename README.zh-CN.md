@@ -9,10 +9,10 @@
 ## 默认发布路线
 
 - 默认中文模型：`thenlper/gte-small-zh`
-- 默认发布方法：`received_attn`、`samrank` 及其 `_idf` 变体
+- 默认发布方法：`received_attn`，以及有语料库时的 `_idf` 变体
 - 默认部署方向：小模型 + 可解释 Attention + 轻量算子
 
-当前仓库把 `gte-small-zh` 作为正式发布默认模型。更大的向量模型和 decoder-only 实验结果会保留在 benchmark 中，但不作为默认交付口径。
+当前仓库仍把 `gte-small-zh` 作为轻量默认发布模型，但主库已经正式支持 decoder-only 的 causal attention 自适配。对于未显式指定层位的 causal 模型，默认会自动推荐中后层，而不是继续落在最后层。
 
 ## 特性
 
@@ -58,7 +58,7 @@ ext = KeyAttenExtractor(model="thenlper/gte-small-zh", language="zh")
 # 纯 Attention
 keywords = ext.extract_keywords(
     "自然语言处理是人工智能的重要方向",
-    method="cls_attn",
+    method="received_attn",
 )
 ```
 
@@ -70,7 +70,7 @@ idf = ext.fit_idf(["自然语言处理是人工智能的重要方向", "关键�
 
 keywords = ext.extract_keywords(
     "自然语言处理是人工智能的重要方向",
-    method="samrank_idf",
+    method="fusion_attn_idf",
     idf_lookup=idf,
 )
 ```
@@ -146,7 +146,9 @@ keywords = extract_keywords(
 
 ### 如何选择方法
 
-`samrank` 系列在 Benchmark 上跑分最高（F1@10），因为它覆盖面广、recall 强。但在实际应用中，`cls_attn` 往往更实用——它提取的是最具辨识度的核心词，一眼就能看出文章在讲什么。
+当前更稳的默认起点是 `received_attn`。如果你有语料库，优先试 `_idf` 变体；在本轮中文 decoder-only 收口里，`csl_test` 主看 `received_attn_idf`，`shencecup_labeled` 主看 `fusion_attn_idf`。`cls_attn` 仍然适合做“一眼看主题”的高辨识度展示，但不再是主库关键词接口的默认方法。
+
+如果你的主指标是 `F1@5`，现在还可以把“嵌套短语去重”作为可选后处理打开。这个开关只会在 `top_k <= 5` 时生效，用来过滤“自然语言处理 / 自然语言 / 语言处理”这类文本包含关系，默认关闭，不影响现有 `@10` 路线。
 
 ## 实战示例
 
@@ -169,6 +171,19 @@ keywords = extract_keywords(
 |------|------|--------|
 | 中文 | `thenlper/gte-small-zh` | ~33M |
 | 英文 | `sentence-transformers/all-MiniLM-L6-v2` | ~22M |
+
+## Decoder-Only 支持
+
+主库现在已经把 decoder-only 的稳定增益并进来了：
+
+- 自动识别 causal 模型
+- 中文 causal 模型默认使用前缀 `核心关键词、关键实体、主题：`
+- 未显式传 `layer_index` 时，默认推荐中后层，而不是最后层
+- 对中文 decoder-only 的当前推荐组合，优先看 `Qwen/Qwen3-Embedding-0.6B + fusion_attn_idf`
+
+最新收口见：
+
+- [decoder-only-rollout-summary.md](./benchmark/decoder-only-rollout-summary.md)
 
 ## 轻量部署
 
@@ -236,11 +251,14 @@ KeyAttenExtractor(
     backend: str = "auto",              # "auto" / "torch" / "onnx"
     onnx_path: str | None = None,       # ONNX attention 文件路径
     user_dict: str | list[str] | dict = None,  # 领域词典路径 / 术语列表 / 术语配置
-    layer_index: int = -1,              # 单层索引（-1 = 最后一层）
+    layer_index: int | None = None,     # None = 自动；causal 模型默认中后层，-1 = 显式最后层
     layer_indices: list[int] = None,    # 多层索引列表
     layer_weights: list[float] = None,  # 多层权重列表
     attn_merge: bool = False,           # Attention 引导的中文单字合并
     merge_threshold: float = 0.3,       # 合并阈值（0.0–1.0）
+    instruction_prefix: str | None = None,  # causal 模型可选前缀
+    is_causal_override: bool | None = None,  # None=自动检测；False=强制按 encoder 读；True=强制按 decoder 读
+    dedup_nested_for_topk5: bool = False,    # 仅在 top_k<=5 时启用子串去重后处理
 )
 ```
 
@@ -258,6 +276,10 @@ KeyAttenExtractor(
 - `extract_keywords` / `extract_word_weights` 支持直接传入外部分词后的 `list[str]`
 - 这时可选传 `pos_tags`；若不传，中文默认按名词 `n`、英文默认按 `eng` 处理
 - `user_dict` 支持三种形式：词典文件路径、术语列表、`{term: tag}` / `{term: (freq, tag)}` 配置
+- `extract_keywords()` / `extract_keywords_batch()` 默认方法现在是 `received_attn`
+- 对 causal 模型，如果 `layer_index` 留空，主库会自动使用推荐的中后层
+- `is_causal_override` 只覆盖 attention 读取模式，不会改变模型本身结构
+- `dedup_nested_for_topk5=True` 时，仅在 `top_k<=5` 应用子串/超串去重，不影响 `@10`
 
 ## 引用
 

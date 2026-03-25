@@ -1,5 +1,5 @@
 # KeyAtten
-
+KeyAtten: Attention-based Keyword/Keyphrase Extraction
 [English](README.md) | [中文](README.zh-CN.md)
 
 Attention-based keyword extraction framework. Zero training, zero labeling, single forward pass. Supports Chinese and English.
@@ -9,10 +9,10 @@ Evaluated on 7 public datasets against 14 methods: +67% F1@10 over traditional b
 ## Default Release Path
 
 - Default Chinese model: `thenlper/gte-small-zh`
-- Default release methods: `received_attn`, `samrank`, and their `_idf` variants
+- Default release method: `received_attn`, plus `_idf` variants when a corpus is available
 - Default deployment path: small encoder + interpretable attention + lightweight operators
 
-The repository now treats `gte-small-zh` as the default production model. Larger embedding models and decoder-only experiments are kept as benchmark exploration, not as the default release path.
+The repository still treats `gte-small-zh` as the lightweight default production model, but the main library now ships decoder-only causal attention adaptation. When no layer is specified for a causal model, KeyAtten automatically recommends a middle-upper layer instead of falling back to the last layer.
 
 ## Features
 
@@ -58,7 +58,7 @@ ext = KeyAttenExtractor(model="thenlper/gte-small-zh", language="zh")
 # Pure attention
 keywords = ext.extract_keywords(
     "自然语言处理是人工智能的重要方向",
-    method="cls_attn",
+    method="received_attn",
 )
 ```
 
@@ -70,7 +70,7 @@ idf = ext.fit_idf(["自然语言处理是人工智能的重要方向", "关键�
 
 keywords = ext.extract_keywords(
     "自然语言处理是人工智能的重要方向",
-    method="samrank_idf",
+    method="fusion_attn_idf",
     idf_lookup=idf,
 )
 ```
@@ -146,7 +146,9 @@ Each method has a corresponding `_idf` hybrid variant (e.g., `cls_attn_idf`) tha
 
 ### Choosing a Method
 
-`samrank` achieves the highest benchmark scores (F1@10) due to broader coverage and stronger recall. In practice, `cls_attn` is often more useful — it extracts the most distinctive core terms, making it ideal for tag clouds and summaries.
+`received_attn` is now the safest default starting point. When a corpus is available, `_idf` variants should be tried first; in the latest Chinese decoder-only rollup, `received_attn_idf` is the main CSL path and `fusion_attn_idf` is the main ShenCeCup path. `cls_attn` is still useful for high-distinctiveness tag-cloud style outputs, but it is no longer the default keyword-extraction method.
+
+If your main metric is `F1@5`, the library now also exposes an optional nested-phrase de-dup post-ranking step. It only activates when `top_k <= 5`, filters substring/superstring duplicates such as `natural language processing / natural language / language processing`, and stays off by default so the `@10` path is unchanged.
 
 ## Practical Examples
 
@@ -169,6 +171,19 @@ Side-by-side comparison of `cls_attn` vs `samrank` across domains (model: `gte-s
 |----------|-------|------------|
 | Chinese | `thenlper/gte-small-zh` | ~33M |
 | English | `sentence-transformers/all-MiniLM-L6-v2` | ~22M |
+
+## Decoder-Only Support
+
+The main library now includes the stable decoder-only gains:
+
+- automatic causal model detection
+- default Chinese causal prefix `核心关键词、关键实体、主题：`
+- automatic middle-upper layer recommendation when `layer_index` is omitted
+- current recommended Chinese decoder-only combination: `Qwen/Qwen3-Embedding-0.6B + fusion_attn_idf`
+
+Latest rollout summary:
+
+- [decoder-only-rollout-summary.md](./benchmark/decoder-only-rollout-summary.md)
 
 ## Lightweight Deployment
 
@@ -236,11 +251,14 @@ KeyAttenExtractor(
     backend: str = "auto",              # "auto" / "torch" / "onnx"
     onnx_path: str | None = None,       # ONNX attention file path
     user_dict: str | list[str] | dict = None,  # domain dictionary path / term list / term config
-    layer_index: int = -1,              # single layer index (-1 = last layer)
+    layer_index: int | None = None,     # None = auto; causal models default to middle-upper layers, -1 = explicit last layer
     layer_indices: list[int] = None,    # multi-layer indices
     layer_weights: list[float] = None,  # multi-layer weights
     attn_merge: bool = False,           # attention-guided char merging for Chinese
     merge_threshold: float = 0.3,       # merge threshold (0.0–1.0)
+    instruction_prefix: str | None = None,  # optional prefix for causal models
+    is_causal_override: bool | None = None,  # None=auto detect; False=force encoder-style readout; True=force decoder-style readout
+    dedup_nested_for_topk5: bool = False,    # enable substring de-dup post-processing only when top_k<=5
 )
 ```
 
@@ -258,6 +276,10 @@ Notes:
 - `extract_keywords` and `extract_word_weights` also accept pre-tokenized `list[str]`
 - when external tokens are provided, `pos_tags` is optional; Chinese defaults to `n`, English defaults to `eng`
 - `user_dict` accepts a dictionary file path, a term list, or mappings like `{term: tag}` / `{term: (freq, tag)}`
+- `extract_keywords()` and `extract_keywords_batch()` now default to `received_attn`
+- if `layer_index` is omitted for a causal model, KeyAtten automatically uses the recommended middle-upper layer
+- `is_causal_override` only overrides the attention readout mode; it does not change the underlying model architecture
+- when `dedup_nested_for_topk5=True`, substring/superstring de-dup is applied only for `top_k<=5`, not for `@10`
 
 ## Citation
 

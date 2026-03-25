@@ -285,6 +285,7 @@ def rank_candidates_from_scores(
     candidates: Sequence[Candidate],
     candidate_scores: Sequence[float],
     top_k: int = 30,
+    dedup_nested: bool = False,
 ) -> list[str]:
     if not candidates:
         return []
@@ -296,13 +297,36 @@ def rank_candidates_from_scores(
 
     sorted_indices = finite_indices[np.argsort(scores_array[finite_indices])[::-1]]
     limit = min(top_k, sorted_indices.size)
-    return [candidates[int(index)].text for index in sorted_indices[:limit]]
+    if not dedup_nested:
+        return [candidates[int(index)].text for index in sorted_indices[:limit]]
+
+    ranked: list[str] = []
+    selected_normalized: list[str] = []
+    for index in sorted_indices:
+        candidate = candidates[int(index)]
+        normalized = normalize_phrase(candidate.text)
+        if not normalized:
+            continue
+
+        is_nested = any(
+            normalized in selected_text or selected_text in normalized
+            for selected_text in selected_normalized
+        )
+        if is_nested:
+            continue
+
+        ranked.append(candidate.text)
+        selected_normalized.append(normalized)
+        if len(ranked) >= limit:
+            break
+    return ranked
 
 
 def candidate_rank_from_word_scores(
     candidates: Sequence[Candidate],
     word_scores: Sequence[float],
     top_k: int = 30,
+    dedup_nested: bool = False,
     token_counts: dict[str, float] | None = None,
     words: Sequence[str] | None = None,
     aggregation_mode: str = "mean",
@@ -320,7 +344,12 @@ def candidate_rank_from_word_scores(
         candidate_starts=candidate_starts,
         candidate_ends=candidate_ends,
     )
-    return rank_candidates_from_scores(candidates, candidate_scores, top_k=top_k)
+    return rank_candidates_from_scores(
+        candidates,
+        candidate_scores,
+        top_k=top_k,
+        dedup_nested=dedup_nested,
+    )
 
 
 def merge_single_chars(

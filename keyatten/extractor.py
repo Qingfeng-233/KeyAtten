@@ -37,12 +37,14 @@ class KeyAttenExtractor:
         backend: str = "auto",
         onnx_path: str | None = None,
         user_dict: str | Sequence[str] | dict[str, str | tuple[int | None, str | None]] | None = None,
-        layer_index: int = -1,
+        layer_index: int | None = None,
         layer_indices: list[int] | None = None,
         layer_weights: list[float] | None = None,
         attn_merge: bool = False,
         merge_threshold: float = 0.3,
         instruction_prefix: str | None = None,
+        is_causal_override: bool | None = None,
+        dedup_nested_for_topk5: bool = False,
     ) -> None:
         if not model:
             raise ValueError("model is required.")
@@ -72,13 +74,15 @@ class KeyAttenExtractor:
         self.attn_merge = attn_merge
         self.merge_threshold = merge_threshold
         self.instruction_prefix = instruction_prefix
+        self.is_causal_override = is_causal_override
+        self.dedup_nested_for_topk5 = dedup_nested_for_topk5
         self.model_bundle: dict | None = None
         self.idf_lookup: dict[str, float] | None = None
 
     def extract_keywords(
         self,
         text: str | Sequence[str],
-        method: str = "cls_attn",
+        method: str = "received_attn",
         top_k: int = 10,
         idf_lookup: dict[str, float] | None = None,
         pos_tags: Sequence[str] | None = None,
@@ -103,6 +107,7 @@ class KeyAttenExtractor:
             candidates,
             word_scores,
             top_k=top_k,
+            dedup_nested=self._use_nested_dedup(top_k),
             token_counts=token_counts,
             words=words,
             candidate_starts=candidate_starts,
@@ -124,7 +129,7 @@ class KeyAttenExtractor:
         scores_by_method, attn_map, word_ids = attention_word_scores_with_raw(
             words,
             self._get_model_bundle(),
-            layer_index=self.layer_index,
+            layer_index=self._resolve_effective_layer_index(),
             layer_indices=self.layer_indices,
             layer_weights=self.layer_weights,
             pos_tags=pos_tags,
@@ -165,6 +170,7 @@ class KeyAttenExtractor:
             candidates,
             word_scores,
             top_k=top_k,
+            dedup_nested=self._use_nested_dedup(top_k),
             token_counts=token_counts,
             words=merged_words,
             candidate_starts=candidate_starts,
@@ -184,7 +190,7 @@ class KeyAttenExtractor:
             scores_by_method, attn_map, word_ids = attention_word_scores_with_raw(
                 words,
                 self._get_model_bundle(),
-                layer_index=self.layer_index,
+                layer_index=self._resolve_effective_layer_index(),
                 layer_indices=self.layer_indices,
                 layer_weights=self.layer_weights,
                 pos_tags=pos_tags,
@@ -203,7 +209,7 @@ class KeyAttenExtractor:
             scores_by_method = attention_word_scores(
                 words,
                 self._get_model_bundle(),
-                layer_index=self.layer_index,
+                layer_index=self._resolve_effective_layer_index(),
                 layer_indices=self.layer_indices,
                 layer_weights=self.layer_weights,
                 pos_tags=pos_tags,
@@ -240,7 +246,7 @@ class KeyAttenExtractor:
     def extract_keywords_batch(
         self,
         texts: list[str | Sequence[str]],
-        method: str = "cls_attn",
+        method: str = "received_attn",
         top_k: int = 10,
         idf_lookup: dict[str, float] | None = None,
         pos_tags_batch: Sequence[Sequence[str] | None] | None = None,
@@ -273,7 +279,11 @@ class KeyAttenExtractor:
         ]
         batch_words = [item[0] for item in prepared]
         batch_pos_tags_list = [item[1] for item in prepared]
-        effective_layer_indices = self.layer_indices if self.layer_indices is not None else [self.layer_index]
+        effective_layer_indices = (
+            list(self.layer_indices)
+            if self.layer_indices is not None
+            else [self._resolve_effective_layer_index()]
+        )
         per_doc_layer_scores = batched_attention_word_scores(
             batch_words,
             self._get_model_bundle(),
@@ -317,6 +327,7 @@ class KeyAttenExtractor:
                     candidates,
                     word_scores,
                     top_k=top_k,
+                    dedup_nested=self._use_nested_dedup(top_k),
                     token_counts=token_counts,
                     words=words,
                     candidate_starts=candidate_starts,
@@ -370,7 +381,7 @@ class KeyAttenExtractor:
         scores_by_method = attention_word_scores(
             words,
             self._get_model_bundle(),
-            layer_index=self.layer_index,
+            layer_index=self._resolve_effective_layer_index(),
             layer_indices=self.layer_indices,
             layer_weights=self.layer_weights,
             pos_tags=pos_tags,
@@ -408,10 +419,21 @@ class KeyAttenExtractor:
                 self.device,
                 backend=self.backend,
                 onnx_path=self.onnx_path,
-                layer_index=self.layer_index,
+                layer_index=self.layer_index if self.layer_index is not None else -1,
                 layer_indices=self.layer_indices,
+                is_causal_override=self.is_causal_override,
             )
         return self.model_bundle
+
+    def _resolve_effective_layer_index(self) -> int:
+        if self.layer_index is not None:
+            return self.layer_index
+        model_bundle = self._get_model_bundle()
+        if model_bundle.get("is_causal"):
+            recommended = model_bundle.get("recommended_layer_index")
+            if recommended is not None:
+                return int(recommended)
+        return -1
 
     def _resolve_instruction_prefix(self) -> str | None:
         if self.instruction_prefix is not None:
@@ -420,6 +442,9 @@ class KeyAttenExtractor:
         if self._get_model_bundle().get("is_causal") and self.language.startswith("zh"):
             return DEFAULT_ZH_CAUSAL_INSTRUCTION_PREFIX
         return None
+
+    def _use_nested_dedup(self, top_k: int) -> bool:
+        return self.dedup_nested_for_topk5 and int(top_k) <= 5
 
     @staticmethod
     def _validate_method(
@@ -437,16 +462,18 @@ def extract_keywords(
     text: str | Sequence[str],
     model: str,
     language: str = "zh",
-    method: str = "cls_attn",
+    method: str = "received_attn",
     top_k: int = 10,
     device: str = "cpu",
     backend: str = "auto",
     onnx_path: str | None = None,
     user_dict: str | Sequence[str] | dict[str, str | tuple[int | None, str | None]] | None = None,
     idf_lookup: dict[str, float] | None = None,
-    layer_index: int = -1,
+    layer_index: int | None = None,
     pos_tags: Sequence[str] | None = None,
     instruction_prefix: str | None = None,
+    is_causal_override: bool | None = None,
+    dedup_nested_for_topk5: bool = False,
 ) -> list[str]:
     extractor = KeyAttenExtractor(
         model=model,
@@ -457,6 +484,8 @@ def extract_keywords(
         user_dict=user_dict,
         layer_index=layer_index,
         instruction_prefix=instruction_prefix,
+        is_causal_override=is_causal_override,
+        dedup_nested_for_topk5=dedup_nested_for_topk5,
     )
     return extractor.extract_keywords(
         text=text,
