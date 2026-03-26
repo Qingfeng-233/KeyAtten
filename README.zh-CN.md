@@ -120,6 +120,22 @@ keywords = ext.extract_keywords(
 )
 ```
 
+### Token-Span 候选打分
+
+```python
+ext = KeyAttenExtractor(
+    model="Qwen/Qwen3-Embedding-0.6B",
+    language="zh",
+    candidate_scoring="token_span",
+)
+
+keywords = ext.extract_keywords(
+    "水木年华被嘲讽已过气，卢庚戌回应称作品会留下来",
+    method="fusion_attn_idf",
+    idf_lookup=idf,
+)
+```
+
 ### 便捷函数
 
 ```python
@@ -149,6 +165,8 @@ keywords = extract_keywords(
 当前更稳的默认起点是 `received_attn`。如果你有语料库，优先试 `_idf` 变体；在本轮中文 decoder-only 收口里，`csl_test` 主看 `received_attn_idf`，`shencecup_labeled` 主看 `fusion_attn_idf`。`cls_attn` 仍然适合做“一眼看主题”的高辨识度展示，但不再是主库关键词接口的默认方法。
 
 如果你的主指标是 `F1@5`，现在还可以把“嵌套短语去重”作为可选后处理打开。这个开关只会在 `top_k <= 5` 时生效，用来过滤“自然语言处理 / 自然语言 / 语言处理”这类文本包含关系，默认关闭，不影响现有 `@10` 路线。
+
+对于原始字符串输入，主库现在还支持可选的 `candidate_scoring="token_span"` 路线。候选生成仍然走分词与词性过滤，但候选排序会直接聚合候选字符跨度内的 token attention，绕过原来的词级 mean-of-means 打分。
 
 ## 实战示例
 
@@ -259,6 +277,7 @@ KeyAttenExtractor(
     instruction_prefix: str | None = None,  # causal 模型可选前缀
     is_causal_override: bool | None = None,  # None=自动检测；False=强制按 encoder 读；True=强制按 decoder 读
     dedup_nested_for_topk5: bool = False,    # 仅在 top_k<=5 时启用子串去重后处理
+    candidate_scoring: str = "word",         # "word" / "token_span"
 )
 ```
 
@@ -280,6 +299,7 @@ KeyAttenExtractor(
 - 对 causal 模型，如果 `layer_index` 留空，主库会自动使用推荐的中后层
 - `is_causal_override` 只覆盖 attention 读取模式，不会改变模型本身结构
 - `dedup_nested_for_topk5=True` 时，仅在 `top_k<=5` 应用子串/超串去重，不影响 `@10`
+- `candidate_scoring="token_span"` 仅适用于原始字符串输入；外部分词输入仍然走原有词级排序路径
 
 ## 引用
 

@@ -206,6 +206,79 @@ def build_candidates(
     return candidates
 
 
+def _aggregate_span_scores(
+    span: np.ndarray,
+    aggregation_mode: str,
+) -> float:
+    if span.size == 0:
+        return 0.0
+    if aggregation_mode == "mean":
+        return float(span.mean())
+    if aggregation_mode == "max":
+        return float(span.max())
+    if aggregation_mode == "top2_mean":
+        return float(np.sort(span)[-2:].mean())
+    if aggregation_mode == "sum_sqrt_len":
+        return float(span.sum() / math.sqrt(max(span.size, 1)))
+    raise ValueError(f"Unsupported aggregation mode: {aggregation_mode}")
+
+
+def locate_word_offsets(
+    text: str,
+    words: Sequence[str],
+) -> list[tuple[int, int]]:
+    offsets: list[tuple[int, int]] = []
+    cursor = 0
+    for word in words:
+        start = text.find(word, cursor)
+        if start < 0:
+            start = text.find(word)
+            if start < 0:
+                raise ValueError(f"Failed to align word {word!r} in text.")
+        end = start + len(word)
+        offsets.append((start, end))
+        cursor = end
+    return offsets
+
+
+def candidate_char_spans(
+    candidates: Sequence[Candidate],
+    word_offsets: Sequence[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for candidate in candidates:
+        start = int(word_offsets[candidate.word_start][0])
+        end = int(word_offsets[candidate.word_end - 1][1])
+        spans.append((start, end))
+    return spans
+
+
+def token_values_from_word_values(
+    token_offsets: Sequence[tuple[int, int]],
+    word_offsets: Sequence[tuple[int, int]],
+    word_values: Sequence[float],
+) -> np.ndarray:
+    token_values = np.zeros(len(token_offsets), dtype=np.float32)
+    word_index = 0
+    for token_index, (token_start, token_end) in enumerate(token_offsets):
+        while word_index < len(word_offsets) and word_offsets[word_index][1] <= token_start:
+            word_index += 1
+        best_value = 0.0
+        best_overlap = 0
+        probe_index = word_index
+        while probe_index < len(word_offsets):
+            word_start, word_end = word_offsets[probe_index]
+            if word_start >= token_end:
+                break
+            overlap = max(0, min(token_end, word_end) - max(token_start, word_start))
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_value = float(word_values[probe_index])
+            probe_index += 1
+        token_values[token_index] = best_value
+    return token_values
+
+
 def _candidate_score(
     candidate: Candidate,
     word_scores: Sequence[float],
@@ -218,16 +291,7 @@ def _candidate_score(
     if span.size == 0:
         return None
 
-    if aggregation_mode == "mean":
-        score = float(span.mean())
-    elif aggregation_mode == "max":
-        score = float(span.max())
-    elif aggregation_mode == "top2_mean":
-        score = float(np.sort(span)[-2:].mean())
-    elif aggregation_mode == "sum_sqrt_len":
-        score = float(span.sum() / math.sqrt(max(span.size, 1)))
-    else:
-        raise ValueError(f"Unsupported aggregation mode: {aggregation_mode}")
+    score = _aggregate_span_scores(span, aggregation_mode)
 
     if repeat_boost > 0.0 and token_counts is not None and words is not None:
         normalized_counts = []
@@ -250,7 +314,7 @@ def candidate_score_values(
     repeat_boost: float = 0.0,
     candidate_starts: np.ndarray | None = None,
     candidate_ends: np.ndarray | None = None,
-) -> np.ndarray:
+    ) -> np.ndarray:
     if not candidates:
         return np.zeros(0, dtype=np.float32)
 
@@ -278,6 +342,28 @@ def candidate_score_values(
         )
         if score is not None:
             scores[index] = float(score)
+    return scores
+
+
+def candidate_score_values_from_token_spans(
+    candidate_spans: Sequence[tuple[int, int]],
+    token_offsets: Sequence[tuple[int, int]],
+    token_scores: Sequence[float],
+    *,
+    aggregation_mode: str = "mean",
+) -> np.ndarray:
+    if not candidate_spans:
+        return np.zeros(0, dtype=np.float32)
+
+    score_array = np.asarray(token_scores, dtype=np.float32)
+    scores = np.zeros(len(candidate_spans), dtype=np.float32)
+    for index, (char_start, char_end) in enumerate(candidate_spans):
+        overlapped = [
+            float(score_array[token_index])
+            for token_index, (token_start, token_end) in enumerate(token_offsets)
+            if token_end > char_start and token_start < char_end
+        ]
+        scores[index] = _aggregate_span_scores(np.asarray(overlapped, dtype=np.float32), aggregation_mode)
     return scores
 
 
@@ -343,6 +429,29 @@ def candidate_rank_from_word_scores(
         repeat_boost=repeat_boost,
         candidate_starts=candidate_starts,
         candidate_ends=candidate_ends,
+    )
+    return rank_candidates_from_scores(
+        candidates,
+        candidate_scores,
+        top_k=top_k,
+        dedup_nested=dedup_nested,
+    )
+
+
+def candidate_rank_from_token_scores(
+    candidates: Sequence[Candidate],
+    candidate_spans: Sequence[tuple[int, int]],
+    token_offsets: Sequence[tuple[int, int]],
+    token_scores: Sequence[float],
+    top_k: int = 30,
+    dedup_nested: bool = False,
+    aggregation_mode: str = "mean",
+) -> list[str]:
+    candidate_scores = candidate_score_values_from_token_spans(
+        candidate_spans,
+        token_offsets,
+        token_scores,
+        aggregation_mode=aggregation_mode,
     )
     return rank_candidates_from_scores(
         candidates,
@@ -462,8 +571,13 @@ __all__ = [
     "is_valid_english_token",
     "segment_text",
     "build_candidates",
+    "locate_word_offsets",
+    "candidate_char_spans",
+    "token_values_from_word_values",
     "candidate_score_values",
+    "candidate_score_values_from_token_spans",
     "rank_candidates_from_scores",
     "candidate_rank_from_word_scores",
+    "candidate_rank_from_token_scores",
     "merge_single_chars",
 ]

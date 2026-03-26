@@ -7,7 +7,7 @@ from typing import Sequence
 
 import numpy as np
 
-from .candidates import is_valid_english_token, is_valid_token, segment_text
+from .candidates import PUNCT_RE, is_valid_english_token, is_valid_token, segment_text
 
 try:
     import torch
@@ -31,7 +31,7 @@ except ImportError:
     Tokenizer = None
 
 
-ATTENTION_METHODS = ("cls_attn", "received_attn", "samrank", "fusion_attn", "voted_attn")
+ATTENTION_METHODS = ("cls_attn", "received_attn", "samrank", "fusion_attn", "voted_attn", "excess_attn")
 _ONNX_PREFERRED_NAMES = (
     "attention_last.onnx",
     "gte_small_zh_attention.onnx",
@@ -159,6 +159,38 @@ def _detect_is_causal_from_json(config_path: Path) -> bool:
     return any("CausalLM" in arch for arch in architectures)
 
 
+def _detect_attention_layer_count(config) -> int | None:
+    for attr_name in ("num_hidden_layers", "n_layer", "num_layers", "n_layers"):
+        value = getattr(config, attr_name, None)
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
+def _detect_attention_layer_count_from_json(config_path: Path) -> int | None:
+    if not config_path.is_file():
+        return None
+    with config_path.open("r", encoding="utf-8") as handle:
+        config = json.load(handle)
+    for key in ("num_hidden_layers", "n_layer", "num_layers", "n_layers"):
+        value = config.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
+def _recommended_decoder_layer_index(layer_count: int | None) -> int | None:
+    if layer_count is None or layer_count <= 0:
+        return None
+    return min(layer_count - 1, max(0, int(layer_count * 0.75)))
+
+
+def _resolve_is_causal_override(is_causal_override: bool | None) -> bool | None:
+    if is_causal_override is None or isinstance(is_causal_override, bool):
+        return is_causal_override
+    raise ValueError("is_causal_override must be None, True, or False.")
+
+
 def build_model_bundle(
     model_name: str,
     device: str,
@@ -166,9 +198,11 @@ def build_model_bundle(
     onnx_path: str | None = None,
     layer_index: int = -1,
     layer_indices: Sequence[int] | None = None,
+    is_causal_override: bool | None = None,
 ) -> dict:
     if backend not in {"auto", "torch", "onnx"}:
         raise ValueError("backend must be one of {'auto', 'torch', 'onnx'}.")
+    is_causal_override = _resolve_is_causal_override(is_causal_override)
 
     resolved_backend = backend
     if resolved_backend == "auto":
@@ -189,7 +223,10 @@ def build_model_bundle(
         model_dir, resolved_onnx = _resolve_onnx_artifacts(model_name, onnx_path, layer_index)
         tokenizer, max_length = _load_tokenizer_metadata(model_dir)
         session = ort.InferenceSession(str(resolved_onnx), providers=_select_ort_providers(device))
-        is_causal = _detect_is_causal_from_json(model_dir / "config.json")
+        config_path = model_dir / "config.json"
+        detected_is_causal = _detect_is_causal_from_json(config_path)
+        is_causal = detected_is_causal if is_causal_override is None else is_causal_override
+        attention_layer_count = _detect_attention_layer_count_from_json(config_path)
         return {
             "backend": "onnx",
             "tokenizer": tokenizer,
@@ -199,7 +236,11 @@ def build_model_bundle(
             "model_dir": str(model_dir),
             "max_length": max_length,
             "layer_index": layer_index,
+            "detected_is_causal": detected_is_causal,
+            "is_causal_override": is_causal_override,
             "is_causal": is_causal,
+            "attention_layer_count": attention_layer_count,
+            "recommended_layer_index": _recommended_decoder_layer_index(attention_layer_count) if is_causal else None,
         }
 
     _require_inference_dependencies()
@@ -210,15 +251,21 @@ def build_model_bundle(
         model = AutoModel.from_pretrained(model_name, output_attentions=True)
     model.to(device)
     model.eval()
-    is_causal = _detect_is_causal(model.config)
+    detected_is_causal = _detect_is_causal(model.config)
+    is_causal = detected_is_causal if is_causal_override is None else is_causal_override
     max_length = int(getattr(model.config, "max_position_embeddings", 512))
+    attention_layer_count = _detect_attention_layer_count(model.config)
     return {
         "backend": "torch",
         "tokenizer": tokenizer,
         "model": model,
         "device": device,
+        "detected_is_causal": detected_is_causal,
+        "is_causal_override": is_causal_override,
         "is_causal": is_causal,
         "max_length": max_length,
+        "attention_layer_count": attention_layer_count,
+        "recommended_layer_index": _recommended_decoder_layer_index(attention_layer_count) if is_causal else None,
     }
 
 
@@ -230,6 +277,13 @@ def normalize_array(values: np.ndarray) -> np.ndarray:
     if math.isclose(min_value, max_value):
         return np.zeros_like(values)
     return (values - min_value) / (max_value - min_value)
+
+
+def _is_text_piece(piece: str) -> bool:
+    stripped = piece.strip()
+    if not stripped:
+        return False
+    return PUNCT_RE.fullmatch(stripped) is None
 
 
 def _aggregate_subwords_to_words(
@@ -246,6 +300,90 @@ def _aggregate_subwords_to_words(
         counts[word_id] += 1.0
     counts[counts == 0.0] = 1.0
     return sums / counts
+
+
+def _collect_text_token_offsets(
+    offsets: Sequence[tuple[int, int]],
+    prefix_char_count: int,
+    text: str,
+) -> tuple[list[int], list[tuple[int, int]], np.ndarray]:
+    kept_indices: list[int] = []
+    kept_offsets: list[tuple[int, int]] = []
+    content_mask = np.zeros(len(offsets), dtype=bool)
+
+    for token_index, (start, end) in enumerate(offsets):
+        if end <= start:
+            continue
+        if start < prefix_char_count:
+            continue
+        char_start = start - prefix_char_count
+        char_end = end - prefix_char_count
+        if char_end <= char_start:
+            continue
+        piece = text[char_start:char_end]
+        if not _is_text_piece(piece):
+            continue
+        kept_indices.append(token_index)
+        kept_offsets.append((char_start, char_end))
+        content_mask[token_index] = True
+
+    return kept_indices, kept_offsets, content_mask
+
+
+def _token_method_scores_from_attention_map(
+    attention_map: np.ndarray,
+    token_indices: Sequence[int],
+    *,
+    is_causal: bool,
+    content_mask: np.ndarray,
+) -> dict[str, np.ndarray]:
+    if not token_indices:
+        return {method_name: np.zeros(0, dtype=np.float32) for method_name in ATTENTION_METHODS}
+
+    selected = np.asarray(token_indices, dtype=np.int32)
+    resolved_content_mask = np.asarray(content_mask, dtype=bool)
+    received_scores = attention_map.sum(axis=0)
+
+    if is_causal:
+        cls_scores = attention_map[-1].copy()
+        cls_scores[~resolved_content_mask] = 0.0
+        row_sum = float(cls_scores.sum())
+        if row_sum > 1e-10:
+            cls_scores /= row_sum
+
+        masked_attn = attention_map.copy()
+        masked_attn[:, ~resolved_content_mask] = 0.0
+        row_sums = masked_attn.sum(axis=1, keepdims=True)
+        row_sums = np.where(row_sums > 1e-10, row_sums, 1.0)
+        masked_attn /= row_sums
+        voted_scores = masked_attn.sum(axis=0)
+    else:
+        cls_scores = attention_map[0]
+        voted_scores = received_scores.copy()
+
+    global_scores = received_scores.copy()
+    redistributed = attention_map * global_scores[None, :]
+    col_sums = redistributed.sum(axis=0, keepdims=True) + 1e-10
+    redistributed = np.divide(redistributed, col_sums, out=np.zeros_like(redistributed), where=col_sums > 0.0)
+    proportional_scores = redistributed.sum(axis=1)
+    samrank_scores = global_scores + proportional_scores
+    fusion_scores = normalize_array(cls_scores) * normalize_array(received_scores)
+    voter_count = np.arange(attention_map.shape[0], 0, -1, dtype=np.float32)
+    voted_scores = voted_scores / voter_count
+    excess_scores = _compute_excess_token_scores(
+        attention_map,
+        is_causal=is_causal,
+        content_mask=resolved_content_mask,
+    )
+
+    return {
+        "cls_attn": np.asarray(cls_scores[selected], dtype=np.float32),
+        "received_attn": np.asarray(received_scores[selected], dtype=np.float32),
+        "samrank": np.asarray(samrank_scores[selected], dtype=np.float32),
+        "fusion_attn": np.asarray(fusion_scores[selected], dtype=np.float32),
+        "voted_attn": np.asarray(voted_scores[selected], dtype=np.float32),
+        "excess_attn": np.asarray(excess_scores[selected], dtype=np.float32),
+    }
 
 
 def _resolve_layer_index(layer_index: int, layer_count: int) -> int:
@@ -286,6 +424,56 @@ def _tokenize_instruction_prefix(
     return segment_text(prefix, language=language)
 
 
+def _resolve_content_mask(
+    word_ids: Sequence[int | None],
+    content_mask: np.ndarray | None,
+) -> np.ndarray:
+    if content_mask is not None:
+        return np.asarray(content_mask, dtype=bool)
+    return np.asarray([word_id is not None for word_id in word_ids], dtype=bool)
+
+
+def _compute_excess_token_scores(
+    attention_map: np.ndarray,
+    *,
+    is_causal: bool,
+    content_mask: np.ndarray,
+) -> np.ndarray:
+    """Compute sink-free excess attention over a row-wise uniform content baseline."""
+    n_tokens = attention_map.shape[0]
+    excess_scores = np.zeros(n_tokens, dtype=np.float32)
+
+    for row_index in range(n_tokens):
+        if is_causal:
+            row_visible = attention_map[row_index, : row_index + 1]
+            row_content_mask = content_mask[: row_index + 1]
+            score_view = excess_scores[: row_index + 1]
+        else:
+            row_visible = attention_map[row_index]
+            row_content_mask = content_mask
+            score_view = excess_scores
+
+        visible_content_count = int(row_content_mask.sum())
+        if visible_content_count <= 1:
+            continue
+
+        row_content = row_visible[row_content_mask].astype(np.float32, copy=False)
+        content_mass = float(row_content.sum())
+        if content_mass <= 1e-10:
+            continue
+
+        p = row_content / content_mass
+        log_visible_content = math.log(visible_content_count)
+        entropy = float(-(p * np.log(np.clip(p, 1e-10, None))).sum())
+        certainty = max(0.0, 1.0 - (entropy / log_visible_content)) if log_visible_content > 1e-10 else 0.0
+
+        baseline = 1.0 / visible_content_count
+        contribution = (content_mass * certainty) * (p - baseline)
+        score_view[row_content_mask] += contribution.astype(np.float32, copy=False)
+
+    return excess_scores
+
+
 def _scores_from_attention_map_causal(
     word_ids: list[int | None],
     attention_map: np.ndarray,
@@ -300,10 +488,11 @@ def _scores_from_attention_map_causal(
     voted_attn is a new method: content-masked, row-renormalized, position-normalized.
     """
     n_tokens = attention_map.shape[0]
+    resolved_content_mask = _resolve_content_mask(word_ids, content_mask)
 
     # --- cls_attn: content-masked last-token attention ---
     cls_scores = attention_map[-1].copy()
-    cls_scores[~content_mask] = 0.0
+    cls_scores[~resolved_content_mask] = 0.0
     row_sum = cls_scores.sum()
     if row_sum > 1e-10:
         cls_scores /= row_sum
@@ -324,13 +513,18 @@ def _scores_from_attention_map_causal(
 
     # --- voted_attn: content-masked, row-renormalized, position-normalized ---
     masked_attn = attention_map.copy()
-    masked_attn[:, ~content_mask] = 0.0
+    masked_attn[:, ~resolved_content_mask] = 0.0
     row_sums = masked_attn.sum(axis=1, keepdims=True)
     row_sums = np.where(row_sums > 1e-10, row_sums, 1.0)
     masked_attn /= row_sums
     voted_scores = masked_attn.sum(axis=0)
     voter_count = np.arange(n_tokens, 0, -1, dtype=np.float32)
     voted_scores /= voter_count
+    excess_scores = _compute_excess_token_scores(
+        attention_map,
+        is_causal=True,
+        content_mask=resolved_content_mask,
+    )
 
     return {
         "cls_attn": _aggregate_subwords_to_words(word_ids, cls_scores, word_count),
@@ -338,6 +532,7 @@ def _scores_from_attention_map_causal(
         "samrank": _aggregate_subwords_to_words(word_ids, samrank_scores, word_count),
         "fusion_attn": _aggregate_subwords_to_words(word_ids, fusion_scores, word_count),
         "voted_attn": _aggregate_subwords_to_words(word_ids, voted_scores, word_count),
+        "excess_attn": _aggregate_subwords_to_words(word_ids, excess_scores, word_count),
     }
 
 
@@ -349,8 +544,9 @@ def _scores_from_attention_map(
     is_causal: bool = False,
     content_mask: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
-    if is_causal and content_mask is not None:
-        return _scores_from_attention_map_causal(word_ids, attention_map, word_count, content_mask)
+    resolved_content_mask = _resolve_content_mask(word_ids, content_mask)
+    if is_causal:
+        return _scores_from_attention_map_causal(word_ids, attention_map, word_count, resolved_content_mask)
 
     cls_scores = attention_map[0]
     received_scores = attention_map.sum(axis=0)
@@ -367,6 +563,11 @@ def _scores_from_attention_map(
     n_tokens = attention_map.shape[0]
     voter_count = np.arange(n_tokens, 0, -1, dtype=np.float32)
     voted_scores = received_scores / voter_count
+    excess_scores = _compute_excess_token_scores(
+        attention_map,
+        is_causal=False,
+        content_mask=resolved_content_mask,
+    )
 
     return {
         "cls_attn": _aggregate_subwords_to_words(word_ids, cls_scores, word_count),
@@ -374,6 +575,7 @@ def _scores_from_attention_map(
         "samrank": _aggregate_subwords_to_words(word_ids, samrank_scores, word_count),
         "fusion_attn": _aggregate_subwords_to_words(word_ids, fusion_scores, word_count),
         "voted_attn": _aggregate_subwords_to_words(word_ids, voted_scores, word_count),
+        "excess_attn": _aggregate_subwords_to_words(word_ids, excess_scores, word_count),
     }
 
 
@@ -722,6 +924,93 @@ def attention_word_scores_with_raw(
     return scores_by_method, raw_attention_map, valid_word_ids
 
 
+def attention_token_scores(
+    text: str,
+    model_bundle: dict,
+    layer_index: int = -1,
+    layer_indices: Sequence[int] | None = None,
+    layer_weights: Sequence[float] | None = None,
+    *,
+    language: str = "zh",
+    instruction_prefix: str | None = None,
+) -> tuple[dict[str, np.ndarray], list[tuple[int, int]]]:
+    effective_layer_indices = list(layer_indices) if layer_indices else [layer_index]
+    is_causal = model_bundle.get("is_causal", False)
+    prefix = (instruction_prefix or "").strip()
+    prefix_text = f"{prefix}\n" if prefix and is_causal and language.startswith("zh") else ""
+    prefixed_text = f"{prefix_text}{text}"
+    prefix_char_count = len(prefix_text)
+
+    if model_bundle.get("backend") == "onnx":
+        _validate_onnx_layer_request(model_bundle, effective_layer_indices)
+        tokenizer = model_bundle["tokenizer"]
+        session = model_bundle["session"]
+        max_length = int(model_bundle["max_length"])
+        output_name = session.get_outputs()[0].name
+
+        encoding = tokenizer.encode(prefixed_text)
+        input_ids = np.asarray(encoding.ids[:max_length], dtype=np.int64)
+        attention_mask = np.asarray(encoding.attention_mask[:max_length], dtype=np.int64)
+        valid_token_count = int(attention_mask.sum())
+        if valid_token_count <= 0:
+            return {method_name: np.zeros(0, dtype=np.float32) for method_name in ATTENTION_METHODS}, []
+
+        offsets = [(int(start), int(end)) for start, end in encoding.offsets[:valid_token_count]]
+        token_indices, token_offsets, content_mask = _collect_text_token_offsets(offsets, prefix_char_count, text)
+        outputs = session.run(
+            [output_name],
+            {
+                "input_ids": input_ids[:valid_token_count][None, :],
+                "attention_mask": attention_mask[:valid_token_count][None, :],
+            },
+        )
+        raw_attention_map = outputs[0][0][:valid_token_count, :valid_token_count].astype(np.float32, copy=False)
+        scores_by_method = _token_method_scores_from_attention_map(
+            raw_attention_map,
+            token_indices,
+            is_causal=is_causal,
+            content_mask=content_mask[:valid_token_count],
+        )
+        return scores_by_method, token_offsets
+
+    tokenizer = model_bundle["tokenizer"]
+    model = model_bundle["model"]
+    device = model_bundle["device"]
+    max_length = int(model_bundle.get("max_length", 512))
+    encoded = tokenizer(
+        prefixed_text,
+        truncation=True,
+        max_length=max_length,
+        return_offsets_mapping=True,
+        return_tensors="pt",
+    )
+    raw_offsets = [(int(start), int(end)) for start, end in encoded["offset_mapping"][0].tolist()]
+    token_indices, token_offsets, content_mask = _collect_text_token_offsets(raw_offsets, prefix_char_count, text)
+    encoded.pop("offset_mapping")
+    encoded = {key: value.to(device) for key, value in encoded.items()}
+
+    with torch.no_grad():
+        outputs = model(**encoded, output_attentions=True)
+
+    valid_token_count = int(encoded["attention_mask"][0].sum().item())
+    layer_count = len(outputs.attentions)
+    per_layer_scores = []
+    for layer_id in effective_layer_indices:
+        resolved = _resolve_layer_index(layer_id, layer_count)
+        attention_map = outputs.attentions[resolved].mean(dim=1)[0][:valid_token_count, :valid_token_count].detach().cpu().numpy()
+        per_layer_scores.append(
+            _token_method_scores_from_attention_map(
+                attention_map,
+                [index for index in token_indices if index < valid_token_count],
+                is_causal=is_causal,
+                content_mask=content_mask[:valid_token_count],
+            )
+        )
+    return _aggregate_layer_word_scores(per_layer_scores, layer_weights=layer_weights), [
+        offset for index, offset in zip(token_indices, token_offsets, strict=False) if index < valid_token_count
+    ]
+
+
 def rescore_with_new_words(
     attention_map: np.ndarray,
     old_word_ids: list[int | None],
@@ -759,6 +1048,7 @@ __all__ = [
     "normalize_array",
     "attention_word_scores",
     "attention_word_scores_with_raw",
+    "attention_token_scores",
     "rescore_with_new_words",
     "batched_attention_word_scores",
 ]

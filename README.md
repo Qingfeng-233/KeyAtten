@@ -120,6 +120,22 @@ keywords = ext.extract_keywords(
 )
 ```
 
+### Token-Span Candidate Scoring
+
+```python
+ext = KeyAttenExtractor(
+    model="Qwen/Qwen3-Embedding-0.6B",
+    language="zh",
+    candidate_scoring="token_span",
+)
+
+keywords = ext.extract_keywords(
+    "水木年华被嘲讽已过气，卢庚戌回应称作品会留下来",
+    method="fusion_attn_idf",
+    idf_lookup=idf,
+)
+```
+
 ### Convenience Function
 
 ```python
@@ -149,6 +165,8 @@ Each method has a corresponding `_idf` hybrid variant (e.g., `cls_attn_idf`) tha
 `received_attn` is now the safest default starting point. When a corpus is available, `_idf` variants should be tried first; in the latest Chinese decoder-only rollup, `received_attn_idf` is the main CSL path and `fusion_attn_idf` is the main ShenCeCup path. `cls_attn` is still useful for high-distinctiveness tag-cloud style outputs, but it is no longer the default keyword-extraction method.
 
 If your main metric is `F1@5`, the library now also exposes an optional nested-phrase de-dup post-ranking step. It only activates when `top_k <= 5`, filters substring/superstring duplicates such as `natural language processing / natural language / language processing`, and stays off by default so the `@10` path is unchanged.
+
+For raw string input, the library now also exposes an optional `candidate_scoring="token_span"` route. Candidate generation still follows the segmenter and POS filter, but ranking aggregates token attention directly over each candidate's character span, bypassing the previous word-level mean-of-means path.
 
 ## Practical Examples
 
@@ -259,6 +277,7 @@ KeyAttenExtractor(
     instruction_prefix: str | None = None,  # optional prefix for causal models
     is_causal_override: bool | None = None,  # None=auto detect; False=force encoder-style readout; True=force decoder-style readout
     dedup_nested_for_topk5: bool = False,    # enable substring de-dup post-processing only when top_k<=5
+    candidate_scoring: str = "word",   # "word" / "token_span"
 )
 ```
 
@@ -280,6 +299,7 @@ Notes:
 - if `layer_index` is omitted for a causal model, KeyAtten automatically uses the recommended middle-upper layer
 - `is_causal_override` only overrides the attention readout mode; it does not change the underlying model architecture
 - when `dedup_nested_for_topk5=True`, substring/superstring de-dup is applied only for `top_k<=5`, not for `@10`
+- `candidate_scoring="token_span"` only applies to raw string input; external token input stays on the word-based ranking path
 
 ## Citation
 

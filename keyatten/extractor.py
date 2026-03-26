@@ -7,6 +7,7 @@ import numpy as np
 from .attention import (
     ATTENTION_METHODS,
     DEFAULT_ZH_CAUSAL_INSTRUCTION_PREFIX,
+    attention_token_scores,
     attention_word_scores,
     attention_word_scores_with_raw,
     batched_attention_word_scores,
@@ -17,9 +18,13 @@ from .candidates import (
     Candidate,
     WordWeight,
     build_candidates,
+    candidate_char_spans,
+    candidate_rank_from_token_scores,
     candidate_rank_from_word_scores,
+    locate_word_offsets,
     merge_single_chars,
     segment_text,
+    token_values_from_word_values,
 )
 from .hybrid import combine_word_scores, inverse_document_frequency, token_counter, word_scores_from_token_values
 
@@ -45,6 +50,7 @@ class KeyAttenExtractor:
         instruction_prefix: str | None = None,
         is_causal_override: bool | None = None,
         dedup_nested_for_topk5: bool = False,
+        candidate_scoring: str = "word",
     ) -> None:
         if not model:
             raise ValueError("model is required.")
@@ -61,6 +67,10 @@ class KeyAttenExtractor:
             raise ValueError("backend must be one of {'auto', 'torch', 'onnx'}.")
         if backend == "onnx" and layer_indices is not None:
             raise ValueError("ONNX backend currently supports only a single exported attention layer.")
+        if candidate_scoring not in {"word", "token_span"}:
+            raise ValueError("candidate_scoring must be one of {'word', 'token_span'}.")
+        if attn_merge and candidate_scoring == "token_span":
+            raise ValueError("candidate_scoring='token_span' does not support attn_merge.")
 
         self.model = model
         self.language = language
@@ -76,6 +86,7 @@ class KeyAttenExtractor:
         self.instruction_prefix = instruction_prefix
         self.is_causal_override = is_causal_override
         self.dedup_nested_for_topk5 = dedup_nested_for_topk5
+        self.candidate_scoring = candidate_scoring
         self.model_bundle: dict | None = None
         self.idf_lookup: dict[str, float] | None = None
 
@@ -95,6 +106,17 @@ class KeyAttenExtractor:
         words, pos_tags, candidates, candidate_starts, candidate_ends, token_counts = self._prepare_document(text, pos_tags=pos_tags)
         if not candidates:
             return []
+        if self.candidate_scoring == "token_span":
+            return self._rank_candidates_with_token_span(
+                text=text,
+                words=words,
+                pos_tags=pos_tags,
+                candidates=candidates,
+                token_counts=token_counts,
+                method=method,
+                top_k=top_k,
+                idf_lookup=idf_lookup,
+            )
 
         word_scores = self._resolve_word_scores(
             words=words,
@@ -112,6 +134,49 @@ class KeyAttenExtractor:
             words=words,
             candidate_starts=candidate_starts,
             candidate_ends=candidate_ends,
+        )
+
+    def _rank_candidates_with_token_span(
+        self,
+        *,
+        text: str | Sequence[str],
+        words: Sequence[str],
+        pos_tags: Sequence[str],
+        candidates: Sequence[Candidate],
+        token_counts: dict[str, float],
+        method: str,
+        top_k: int,
+        idf_lookup: dict[str, float] | None,
+    ) -> list[str]:
+        if not isinstance(text, str):
+            raise ValueError("candidate_scoring='token_span' requires raw string text input.")
+
+        word_offsets = locate_word_offsets(text, words)
+        candidate_spans = candidate_char_spans(candidates, word_offsets)
+        token_method_scores, token_offsets = attention_token_scores(
+            text,
+            self._get_model_bundle(),
+            layer_index=self._resolve_effective_layer_index(),
+            layer_indices=self.layer_indices,
+            layer_weights=self.layer_weights,
+            language=self.language,
+            instruction_prefix=self._resolve_instruction_prefix(),
+        )
+        base_method = method.removesuffix("_idf")
+        token_scores = token_method_scores[base_method]
+        if method.endswith("_idf"):
+            lookup = self._require_idf_lookup(idf_lookup)
+            tfidf_word_scores = self._tfidf_word_scores(words, pos_tags, token_counts, lookup)
+            tfidf_token_scores = token_values_from_word_values(token_offsets, word_offsets, tfidf_word_scores)
+            token_scores = combine_word_scores(token_scores, tfidf_token_scores, mode="product")
+
+        return candidate_rank_from_token_scores(
+            candidates,
+            candidate_spans,
+            token_offsets,
+            token_scores,
+            top_k=top_k,
+            dedup_nested=self._use_nested_dedup(top_k),
         )
 
     def _extract_keywords_with_merge(
@@ -256,6 +321,17 @@ class KeyAttenExtractor:
             return []
         if pos_tags_batch is not None and len(pos_tags_batch) != len(texts):
             raise ValueError("pos_tags_batch must have the same length as texts.")
+        if self.candidate_scoring == "token_span":
+            return [
+                self.extract_keywords(
+                    text,
+                    method=method,
+                    top_k=top_k,
+                    idf_lookup=idf_lookup,
+                    pos_tags=pos_tags_batch[index] if pos_tags_batch is not None else None,
+                )
+                for index, text in enumerate(texts)
+            ]
 
         # attn_merge: fall back to per-document extraction (no batch optimization)
         if self.attn_merge and self.language.startswith("zh") and self._resolve_instruction_prefix() is None:
@@ -474,6 +550,7 @@ def extract_keywords(
     instruction_prefix: str | None = None,
     is_causal_override: bool | None = None,
     dedup_nested_for_topk5: bool = False,
+    candidate_scoring: str = "word",
 ) -> list[str]:
     extractor = KeyAttenExtractor(
         model=model,
@@ -486,6 +563,7 @@ def extract_keywords(
         instruction_prefix=instruction_prefix,
         is_causal_override=is_causal_override,
         dedup_nested_for_topk5=dedup_nested_for_topk5,
+        candidate_scoring=candidate_scoring,
     )
     return extractor.extract_keywords(
         text=text,
