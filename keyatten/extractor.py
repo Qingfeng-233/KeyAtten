@@ -56,6 +56,7 @@ class KeyAttenExtractor:
         dedup_nested: bool = False,
         candidate_scoring: str = "word",
         enable_gravity: bool = False,
+        dtype: str | None = "auto",
     ) -> None:
         if not model:
             raise ValueError("model is required.")
@@ -96,6 +97,7 @@ class KeyAttenExtractor:
         self.dedup_nested = dedup_nested
         self.candidate_scoring = candidate_scoring
         self.enable_gravity = enable_gravity
+        self.dtype = dtype
         self.model_bundle: dict | None = None
         self.idf_lookup: dict[str, float] | None = None
 
@@ -528,6 +530,7 @@ class KeyAttenExtractor:
                 layer_index=self.layer_index if self.layer_index is not None else -1,
                 layer_indices=self.layer_indices,
                 is_causal_override=self.is_causal_override,
+                dtype=self.dtype,
             )
         return self.model_bundle
 

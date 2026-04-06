@@ -199,6 +199,7 @@ def build_model_bundle(
     layer_index: int = -1,
     layer_indices: Sequence[int] | None = None,
     is_causal_override: bool | None = None,
+    dtype: str | None = "auto",
 ) -> dict:
     if backend not in {"auto", "torch", "onnx"}:
         raise ValueError("backend must be one of {'auto', 'torch', 'onnx'}.")
@@ -244,11 +245,17 @@ def build_model_bundle(
         }
 
     _require_inference_dependencies()
+    import torch as _torch
+    _dtype_map = {"auto": None, "float32": _torch.float32, "float16": _torch.float16, "bfloat16": _torch.bfloat16}
+    resolved_dtype = _dtype_map.get(dtype) if isinstance(dtype, str) else dtype
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+    load_kwargs: dict = {"output_attentions": True}
+    if resolved_dtype is not None:
+        load_kwargs["torch_dtype"] = resolved_dtype
     try:
-        model = AutoModel.from_pretrained(model_name, output_attentions=True, attn_implementation="eager")
+        model = AutoModel.from_pretrained(model_name, attn_implementation="eager", **load_kwargs)
     except TypeError:
-        model = AutoModel.from_pretrained(model_name, output_attentions=True)
+        model = AutoModel.from_pretrained(model_name, **load_kwargs)
     model.to(device)
     model.eval()
     detected_is_causal = _detect_is_causal(model.config)
@@ -766,7 +773,7 @@ def batched_attention_word_scores(
         word_ids_per_item = [encoded.word_ids(batch_index=index) for index in range(len(word_batch))]
         encoded = {key: value.to(device) for key, value in encoded.items()}
 
-        with torch.no_grad():
+        with torch.inference_mode():
             outputs = model(**encoded, output_attentions=True)
 
         layer_count = len(outputs.attentions)
@@ -895,7 +902,7 @@ def attention_word_scores_with_raw(
     word_ids = encoded.word_ids(batch_index=0)
     encoded = {key: value.to(device) for key, value in encoded.items()}
 
-    with torch.no_grad():
+    with torch.inference_mode():
         outputs = model(**encoded, output_attentions=True)
 
     layer_count = len(outputs.attentions)
@@ -989,7 +996,7 @@ def attention_token_scores(
     encoded.pop("offset_mapping")
     encoded = {key: value.to(device) for key, value in encoded.items()}
 
-    with torch.no_grad():
+    with torch.inference_mode():
         outputs = model(**encoded, output_attentions=True)
 
     valid_token_count = int(encoded["attention_mask"][0].sum().item())
