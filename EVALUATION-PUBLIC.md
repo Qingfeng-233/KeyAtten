@@ -81,7 +81,7 @@ KeyAtten provides 4 pure attention methods (`cls_attn`, `received_attn`, `samran
 
 ### Interpretation
 
-1. **Chinese News**: QK LoRA achieves F1@10 = 0.3292, **+113%** over the strongest traditional baseline and **+28%** over the best zero-shot attention method
+1. **Chinese News**: QK LoRA achieves F1@10 = 0.3292, **+113%** over the strongest traditional baseline and **+28%** over the best zero-shot attention method. Notably, QK LoRA also **surpasses Gemini flash-lite** (0.2894) by +14% on the same 1000-doc full evaluation (see [LLM Comparison](#llm-comparison-shencecup-chinese-news) below)
 2. **Chinese Academic**: `samrank_idf` surpasses the strongest traditional baseline (TF-IDF), with IDF hybrid providing the key gain. QK LoRA (0.1750) is competitive but does not surpass TF-IDF (0.1935) — this reflects the inherent limitation of **extractive keyword generation**: CSL ground-truth keywords often include rephrased or abstracted terms not present in the original text, which extractive methods fundamentally cannot recover
 3. **English Long Documents**: `cls_attn_idf` consistently leads by ~80% over external baselines on two independent fulltext datasets; top 4 are all KeyAtten-IDF methods
 4. **English Short Documents**: `fusion_attn` matches the best external method (KeyBERT) but does not pull ahead
@@ -123,6 +123,30 @@ For release and deployment, the project standardizes on the encoder route around
 | 9 | TermFreq | — | 0.1543 | 0.3542 |
 | 10 | KeyBERT | m3e-small | 0.0991 | 0.2167 |
 | 11 | TextRank | — | 0.0661 | 0.1308 |
+
+### LLM Comparison (ShenCeCup Chinese News)
+
+> Full-dataset evaluation (1000 docs). LLM methods use `gemini-3.1-flash-lite-preview` via API with temperature=0. Other LLM results from 30-doc pilot are included as reference.
+
+| Rank | Method | Model / Parameters | F1@5 | F1@10 | R@10 | Latency |
+|:---:|--------|-------------------|:---:|:---:|:---:|:---:|
+| 1 | **QK LoRA** | Qwen3-Emb-0.6B (600M) | **0.4653** | **0.3292** | **0.7325** | ~0.02s |
+| 2 | Gemini flash-lite | LLM API | 0.4006 | 0.2894 | 0.5973 | ~11s |
+| 3 | `received_attn` | Qwen3.5-0.8B (800M) | — | 0.2579 | 0.5633 | ~0.1s |
+| 4 | `samrank` | gte-small-zh (33M) | — | 0.2495 | 0.5367 | ~0.02s |
+
+Reference (30-doc pilot, not directly comparable):
+
+| LLM | F1@5 | F1@10 |
+|-----|:---:|:---:|
+| claude-haiku-4-5 | 0.4686 | 0.2946 |
+| gemini-3.1-flash-lite | 0.4650 | 0.3307 |
+| gpt-5.4-mini | 0.4202 | 0.2811 |
+| mimo-v2-flash | 0.4083 | 0.3084 |
+| qwen3.5-plus | 0.3668 | 0.2584 |
+| deepseek-v3.2 | 0.3509 | 0.2581 |
+
+> **Key takeaway**: QK LoRA (600M parameters, single forward pass, ~0.02s/doc) outperforms Gemini flash-lite (LLM API, ~11s/doc) on F1@10 by **+14%** and on R@10 by **+23%**, at **~500× lower latency** and without requiring API access.
 
 ---
 
