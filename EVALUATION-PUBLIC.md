@@ -69,20 +69,20 @@ KeyAtten provides 4 pure attention methods (`cls_attn`, `received_attn`, `samran
 
 > Metric: F1@10 | Best result per method category for each dataset
 
-| Dataset | Scenario | Best Traditional | Best External | KeyAtten Pure Attention | KeyAtten-IDF Best | Improvement |
-|---------|----------|:---:|:---:|:---:|:---:|:---:|
-| CSL | Chinese / Academic | TF-IDF 0.1935 | KeyBERT 0.1296 | `samrank` 0.1773 | `samrank_idf` **0.2106** | +9% vs traditional |
-| ShenCeCup | Chinese / News | TermFreq 0.1543 | TextRank 0.0661 | `samrank` **0.2495** | `cls_attn_idf` 0.2357 | +67% vs traditional |
-| SemEval2010 | English / Short | TF-IDF 0.1040 | KeyBERT 0.1448 | `fusion_attn` 0.1448 | — | On par |
-| PubMed | English / Short | TF-IDF 0.1211 | KeyBERT 0.1327 | `fusion_attn` 0.1327 | — | On par |
-| LIS2000 | English / Short | TermFreq 0.1040 | KeyBERT 0.1370 | `fusion_attn` 0.1370 | — | On par |
-| SemEval2010-fulltext | English / Long | TF-IDF 0.0604 | TextRank 0.0754 | `cls_attn` 0.0671 | `cls_attn_idf` **0.1344** | +78% vs external |
-| Krapivin2009-fulltext | English / Long | TF-IDF 0.0565 | TextRank 0.0707 | `cls_attn` 0.0789 | `cls_attn_idf` **0.1268** | +79% vs external |
+| Dataset | Scenario | Best Traditional | Best External | KeyAtten Pure Attention | KeyAtten-IDF Best | QK LoRA (Experimental) | Improvement |
+|---------|----------|:---:|:---:|:---:|:---:|:---:|:---:|
+| CSL | Chinese / Academic | TF-IDF 0.1935 | KeyBERT 0.1296 | `samrank` 0.1773 | `samrank_idf` **0.2106** | 0.1561 | +9% vs traditional |
+| ShenCeCup | Chinese / News | TermFreq 0.1543 | TextRank 0.0661 | `samrank` 0.2495 | `cls_attn_idf` 0.2357 | **0.3185** | +107% vs traditional |
+| SemEval2010 | English / Short | TF-IDF 0.1040 | KeyBERT 0.1448 | `fusion_attn` 0.1448 | — | — | On par |
+| PubMed | English / Short | TF-IDF 0.1211 | KeyBERT 0.1327 | `fusion_attn` 0.1327 | — | — | On par |
+| LIS2000 | English / Short | TermFreq 0.1040 | KeyBERT 0.1370 | `fusion_attn` 0.1370 | — | — | On par |
+| SemEval2010-fulltext | English / Long | TF-IDF 0.0604 | TextRank 0.0754 | `cls_attn` 0.0671 | `cls_attn_idf` **0.1344** | — | +78% vs external |
+| Krapivin2009-fulltext | English / Long | TF-IDF 0.0565 | TextRank 0.0707 | `cls_attn` 0.0789 | `cls_attn_idf` **0.1268** | — | +79% vs external |
 
 ### Interpretation
 
-1. **Chinese News**: Pure attention (`samrank`) significantly outperforms traditional baselines on both Encoder and Decoder-only architectures
-2. **Chinese Academic**: `samrank_idf` surpasses the strongest traditional baseline (TF-IDF), with IDF hybrid providing the key gain
+1. **Chinese News**: QK LoRA achieves F1@10 = 0.3185, **+107%** over the strongest traditional baseline and **+24%** over the best zero-shot attention method
+2. **Chinese Academic**: `samrank_idf` surpasses the strongest traditional baseline (TF-IDF), with IDF hybrid providing the key gain. QK LoRA underperforms here due to domain mismatch in training data
 3. **English Long Documents**: `cls_attn_idf` consistently leads by ~80% over external baselines on two independent fulltext datasets; top 4 are all KeyAtten-IDF methods
 4. **English Short Documents**: `fusion_attn` matches the best external method (KeyBERT) but does not pull ahead
 
@@ -101,26 +101,28 @@ For release and deployment, the project standardizes on the encoder route around
 | 3 | `samrank` | gte-small-zh | 0.1773 | 0.2567 |
 | 4 | `received_attn` | m3e-small | 0.1666 | 0.2298 |
 | 5 | `received_attn` | Qwen3.5-2B | 0.1568 | 0.2347 |
-| 6 | `cls_attn` | gte-small-zh | 0.1554 | 0.2215 |
-| 7 | KeyBERT | m3e-small | 0.1531 | 0.2078 |
-| 8 | `fusion_attn` | gte-small-zh | 0.1505 | 0.2150 |
-| 9 | `received_attn` | Qwen3.5-0.8B | 0.1496 | 0.2222 |
-| 10 | TextRank | — | 0.1237 | 0.1812 |
+| 6 | **QK LoRA** | Qwen3-Emb-0.6B | 0.1561 | — |
+| 7 | `cls_attn` | gte-small-zh | 0.1554 | 0.2215 |
+| 8 | KeyBERT | m3e-small | 0.1531 | 0.2078 |
+| 9 | `fusion_attn` | gte-small-zh | 0.1505 | 0.2150 |
+| 10 | `received_attn` | Qwen3.5-0.8B | 0.1496 | 0.2222 |
+| 11 | TextRank | — | 0.1237 | 0.1812 |
 
 ### ShenCeCup Chinese News
 
 | Rank | Method | Model | F1@10 | R@10 |
 |:---:|--------|-------|:---:|:---:|
-| 1 | `received_attn` | Qwen3.5-0.8B | **0.2579** | 0.5633 |
-| 2 | `samrank` | gte-small-zh | **0.2495** | 0.5367 |
-| 3 | `received_attn` | gte-small-zh | **0.2424** | 0.5242 |
-| 4 | `cls_attn` | gte-small-zh | **0.2269** | 0.4892 |
-| 5 | `fusion_attn` | gte-small-zh | **0.2264** | 0.4867 |
-| 6 | `received_attn` | Qwen3.5-2B | 0.2221 | 0.4975 |
-| 7 | TF-IDF | — | 0.1543 | 0.3542 |
-| 8 | TermFreq | — | 0.1543 | 0.3542 |
-| 9 | KeyBERT | m3e-small | 0.0991 | 0.2167 |
-| 10 | TextRank | — | 0.0661 | 0.1308 |
+| 1 | **QK LoRA** | Qwen3-Emb-0.6B | **0.3185** | — |
+| 2 | `received_attn` | Qwen3.5-0.8B | 0.2579 | 0.5633 |
+| 3 | `samrank` | gte-small-zh | 0.2495 | 0.5367 |
+| 4 | `received_attn` | gte-small-zh | 0.2424 | 0.5242 |
+| 5 | `cls_attn` | gte-small-zh | 0.2269 | 0.4892 |
+| 6 | `fusion_attn` | gte-small-zh | 0.2264 | 0.4867 |
+| 7 | `received_attn` | Qwen3.5-2B | 0.2221 | 0.4975 |
+| 8 | TF-IDF | — | 0.1543 | 0.3542 |
+| 9 | TermFreq | — | 0.1543 | 0.3542 |
+| 10 | KeyBERT | m3e-small | 0.0991 | 0.2167 |
+| 11 | TextRank | — | 0.0661 | 0.1308 |
 
 ---
 
