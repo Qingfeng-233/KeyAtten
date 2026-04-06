@@ -52,6 +52,8 @@ python download_hf_assets.py --model "distilbert-base-uncased" --root-dir "." --
 
 ## 第 2 步：运行评测
 
+说明：各脚本的相对输出路径现在统一解析到 `../测试沙箱/Outputs/`。例如 `--output-dir "outputs_round10_hybrid_mean"` 会写入 `../测试沙箱/Outputs/outputs_round10_hybrid_mean/`。
+
 ### 中文主线评测
 
 ```powershell
@@ -144,7 +146,7 @@ python generate_attention_case_study.py `
 
 ## 第 3 步：查看结果
 
-评测结果以 JSON 格式存储在各 `output-dir` 下的 `keyword_benchmark_results.json` 中。
+评测结果以 JSON 格式存储在 `../测试沙箱/Outputs/<output-dir>/keyword_benchmark_results.json` 中。
 
 ### 主要结果文件
 

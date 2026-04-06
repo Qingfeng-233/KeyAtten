@@ -20,6 +20,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from keyword_bench.data import build_all_eval_sets
 from keyword_bench.methods import build_candidates, candidate_rank_from_word_scores, segment_text
 from keyword_bench.metrics import evaluate_predictions
+from keyword_bench.output_paths import resolve_output_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,8 +62,7 @@ def _resolve_anchor_index(input_ids: torch.Tensor, tokenizer, anchor: str) -> in
 def main() -> None:
     args = parse_args()
     root_dir = Path(args.root_dir).resolve()
-    output_path = (root_dir / args.output).resolve()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = resolve_output_path(args.output)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(

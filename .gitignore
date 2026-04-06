@@ -3,3 +3,16 @@
 __pycache__/
 *.pyc
 CLAUDE.md
+AGENTS.md
+tmp_kaguya_input.md
+
+# Large files
+*.tar.gz
+*.safetensors
+checkpoint.pt
+hidden_head_remote_bundle*
+
+# Build artifacts
+dist/
+build/
+*.egg-info/

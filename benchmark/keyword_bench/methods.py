@@ -6,6 +6,7 @@ import sys
 from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
+from types import MethodType
 from typing import Dict, Iterable, List, Sequence
 
 import jieba.posseg as pseg
@@ -20,9 +21,20 @@ from .metrics import normalize_phrase
 VENDOR_DIR = Path(__file__).resolve().parent.parent / ".vendor"
 
 
-VALID_POS_PREFIXES = ("n", "nz", "eng", "v", "vn")
+VALID_POS_PREFIXES = ("n", "nz", "eng", "v", "vn", "a", "m", "t")
 PUNCT_RE = re.compile(r"^[\W_]+$", re.UNICODE)
 EN_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
+DEFAULT_ZH_CAUSAL_INSTRUCTION_PREFIX = "找关键词"
+CLS_HEAD_SELECTION_METHOD_NAMES = {
+    "topk": "cls_attn_headtopk",
+    "softmax": "cls_attn_headsoftmax",
+    "somp": "cls_attn_headsomp",
+}
+RECEIVED_HEAD_SELECTION_METHOD_NAMES = {
+    "topk": "received_attn_headtopk",
+    "softmax": "received_attn_headsoftmax",
+    "somp": "received_attn_headsomp",
+}
 
 
 @dataclass(slots=True)
@@ -90,6 +102,72 @@ def build_candidates(
                     break
                 if words[start].lower() in ENGLISH_STOP_WORDS or words[end - 1].lower() in ENGLISH_STOP_WORDS:
                     continue
+            phrase = joiner.join(words[start:end]).strip()
+            if language.startswith("en"):
+                phrase = phrase.strip("- ")
+            normalized = normalize_phrase(phrase)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            candidates.append(Candidate(text=phrase, word_start=start, word_end=end))
+    return candidates
+
+
+def _is_attention_candidate_token(word: str, language: str = "zh") -> bool:
+    stripped = word.strip()
+    if not stripped:
+        return False
+    if language.startswith("zh"):
+        return not bool(PUNCT_RE.match(stripped))
+    return bool(re.search(r"[A-Za-z0-9]", stripped))
+
+
+def build_attention_gated_candidates(
+    words: Sequence[str],
+    gate_scores: Sequence[float],
+    language: str = "zh",
+    max_ngram: int = 4,
+    threshold_mode: str = "mean",
+    threshold_percentile: float = 75.0,
+) -> List[Candidate]:
+    if not words:
+        return []
+
+    gate_array = np.asarray(gate_scores, dtype=np.float32)
+    if gate_array.size != len(words):
+        raise ValueError("gate_scores must have the same length as words.")
+
+    valid_token_mask = np.asarray([_is_attention_candidate_token(word, language=language) for word in words], dtype=bool)
+    if not bool(valid_token_mask.any()):
+        return []
+
+    valid_scores = gate_array[valid_token_mask]
+    if threshold_mode == "mean":
+        threshold = float(valid_scores.mean())
+    elif threshold_mode == "percentile":
+        threshold = float(np.percentile(valid_scores, threshold_percentile))
+    else:
+        raise ValueError(f"Unsupported attention candidate threshold mode: {threshold_mode}")
+
+    anchor_mask = valid_token_mask & (gate_array >= threshold)
+    if not bool(anchor_mask.any()):
+        valid_indices = np.flatnonzero(valid_token_mask)
+        anchor_mask[valid_indices[int(np.argmax(gate_array[valid_indices]))]] = True
+
+    candidates: List[Candidate] = []
+    seen = set()
+    joiner = "" if language.startswith("zh") else " "
+    for start in range(len(words)):
+        if not valid_token_mask[start]:
+            continue
+        has_anchor = False
+        for end in range(start + 1, min(len(words), start + max_ngram) + 1):
+            token_index = end - 1
+            if not valid_token_mask[token_index]:
+                break
+            has_anchor = has_anchor or bool(anchor_mask[token_index])
+            if not has_anchor:
+                continue
             phrase = joiner.join(words[start:end]).strip()
             if language.startswith("en"):
                 phrase = phrase.strip("- ")
@@ -369,7 +447,402 @@ def _resolve_embedding_pooling(model_name: str) -> str:
     return "mean"
 
 
-def build_model_bundle(model_name: str, device: str) -> dict:
+def _detect_is_causal(config) -> bool:
+    if getattr(config, "is_decoder", False):
+        return True
+    architectures = getattr(config, "architectures", None) or []
+    return any("CausalLM" in arch for arch in architectures)
+
+
+def _tokenize_instruction_prefix(
+    instruction_prefix: str | None,
+    language: str,
+) -> tuple[list[str], list[str]]:
+    prefix = (instruction_prefix or "").strip()
+    if not prefix:
+        return [], []
+    return segment_text(prefix, language=language)
+
+
+def _build_content_mask(
+    word_ids: Sequence[int | None],
+    words: Sequence[str],
+    pos_tags: Sequence[str],
+    language: str,
+) -> np.ndarray:
+    mask = np.zeros(len(word_ids), dtype=bool)
+    for token_index, word_id in enumerate(word_ids):
+        if word_id is None or word_id < 0 or word_id >= len(words):
+            continue
+        if language.startswith("en"):
+            if is_valid_english_token(words[word_id]):
+                mask[token_index] = True
+        else:
+            if is_valid_token(words[word_id], pos_tags[word_id]):
+                mask[token_index] = True
+    return mask
+
+
+def _resolve_content_mask(
+    word_ids: Sequence[int | None],
+    content_mask: np.ndarray | None,
+) -> np.ndarray:
+    if content_mask is not None:
+        return np.asarray(content_mask, dtype=bool)
+    return np.asarray([word_id is not None for word_id in word_ids], dtype=bool)
+
+
+def _compute_excess_token_scores(
+    attention_map: np.ndarray,
+    *,
+    is_causal: bool,
+    content_mask: np.ndarray,
+) -> np.ndarray:
+    n_tokens = attention_map.shape[0]
+    excess_scores = np.zeros(n_tokens, dtype=np.float32)
+
+    for row_index in range(n_tokens):
+        if is_causal:
+            row_visible = attention_map[row_index, : row_index + 1]
+            row_content_mask = content_mask[: row_index + 1]
+            score_view = excess_scores[: row_index + 1]
+        else:
+            row_visible = attention_map[row_index]
+            row_content_mask = content_mask
+            score_view = excess_scores
+
+        visible_content_count = int(row_content_mask.sum())
+        if visible_content_count <= 1:
+            continue
+
+        row_content = row_visible[row_content_mask].astype(np.float32, copy=False)
+        content_mass = float(row_content.sum())
+        if content_mass <= 1e-10:
+            continue
+
+        p = row_content / content_mass
+        log_visible_content = math.log(visible_content_count)
+        entropy = float(-(p * np.log(np.clip(p, 1e-10, None))).sum())
+        certainty = max(0.0, 1.0 - (entropy / log_visible_content)) if log_visible_content > 1e-10 else 0.0
+
+        baseline = 1.0 / visible_content_count
+        contribution = (content_mass * certainty) * (p - baseline)
+        score_view[row_content_mask] += contribution.astype(np.float32, copy=False)
+
+    return excess_scores
+
+
+def _compute_sink_reallocated_received_scores(
+    attention_map: np.ndarray,
+    *,
+    is_causal: bool,
+    content_mask: np.ndarray,
+) -> np.ndarray:
+    n_tokens = attention_map.shape[0]
+    reallocated_scores = np.zeros(n_tokens, dtype=np.float32)
+
+    for row_index in range(n_tokens):
+        if is_causal:
+            row_visible = attention_map[row_index, : row_index + 1]
+            row_content_mask = content_mask[: row_index + 1]
+            score_view = reallocated_scores[: row_index + 1]
+        else:
+            row_visible = attention_map[row_index]
+            row_content_mask = content_mask
+            score_view = reallocated_scores
+
+        row_content = row_visible[row_content_mask].astype(np.float32, copy=False)
+        content_mass = float(row_content.sum())
+        if content_mass <= 1e-10:
+            continue
+        score_view[row_content_mask] += row_content / content_mass
+
+    return reallocated_scores
+
+
+def _compute_sink_reallocated_attention_map(
+    attention_map: np.ndarray,
+    *,
+    is_causal: bool,
+    content_mask: np.ndarray,
+) -> np.ndarray:
+    reallocated = np.zeros_like(attention_map, dtype=np.float32)
+    n_tokens = attention_map.shape[0]
+
+    for row_index in range(n_tokens):
+        if is_causal:
+            row_visible = attention_map[row_index, : row_index + 1]
+            row_content_mask = content_mask[: row_index + 1]
+            row_view = reallocated[row_index, : row_index + 1]
+        else:
+            row_visible = attention_map[row_index]
+            row_content_mask = content_mask
+            row_view = reallocated[row_index]
+
+        row_content = row_visible[row_content_mask].astype(np.float32, copy=False)
+        content_mass = float(row_content.sum())
+        if content_mass <= 1e-10:
+            continue
+        row_view[row_content_mask] = row_content / content_mass
+
+    return reallocated
+
+
+def _compute_debiased_received_scores(
+    received_scores: np.ndarray,
+    null_received_baseline: np.ndarray | None,
+    *,
+    gamma: float,
+) -> np.ndarray | None:
+    if null_received_baseline is None:
+        return None
+    baseline = np.asarray(null_received_baseline, dtype=np.float32)
+    if baseline.shape != received_scores.shape:
+        raise ValueError("null_received_baseline must have the same shape as received_scores.")
+    return np.maximum(received_scores - (float(gamma) * baseline), 0.0).astype(np.float32, copy=False)
+
+
+def _compute_excess_token_scores_torch(
+    attention_map: torch.Tensor,
+    *,
+    is_causal: bool,
+    content_mask: torch.Tensor,
+) -> torch.Tensor:
+    n_tokens = attention_map.shape[0]
+    excess_scores = torch.zeros(n_tokens, dtype=torch.float32, device=attention_map.device)
+
+    for row_index in range(n_tokens):
+        if is_causal:
+            row_visible = attention_map[row_index, : row_index + 1]
+            row_content_mask = content_mask[: row_index + 1]
+            score_view = excess_scores[: row_index + 1]
+        else:
+            row_visible = attention_map[row_index]
+            row_content_mask = content_mask
+            score_view = excess_scores
+
+        visible_content_count = int(row_content_mask.sum().item())
+        if visible_content_count <= 1:
+            continue
+
+        row_content = row_visible[row_content_mask].float()
+        content_mass = row_content.sum()
+        if not bool((content_mass > 1e-10).item()):
+            continue
+
+        p = row_content / content_mass
+        log_visible_content = math.log(visible_content_count)
+        entropy = -(p * p.clamp_min(1e-10).log()).sum()
+        certainty = max(0.0, 1.0 - (float(entropy.item()) / log_visible_content)) if log_visible_content > 1e-10 else 0.0
+
+        baseline = 1.0 / visible_content_count
+        contribution = (content_mass * certainty) * (p - baseline)
+        score_view[row_content_mask] += contribution
+
+    return excess_scores
+
+
+def _compute_sink_reallocated_received_scores_torch(
+    attention_map: torch.Tensor,
+    *,
+    is_causal: bool,
+    content_mask: torch.Tensor,
+) -> torch.Tensor:
+    n_tokens = attention_map.shape[0]
+    reallocated_scores = torch.zeros(n_tokens, dtype=torch.float32, device=attention_map.device)
+
+    for row_index in range(n_tokens):
+        if is_causal:
+            row_visible = attention_map[row_index, : row_index + 1]
+            row_content_mask = content_mask[: row_index + 1]
+            score_view = reallocated_scores[: row_index + 1]
+        else:
+            row_visible = attention_map[row_index]
+            row_content_mask = content_mask
+            score_view = reallocated_scores
+
+        row_content = row_visible[row_content_mask].float()
+        content_mass = row_content.sum()
+        if not bool((content_mass > 1e-10).item()):
+            continue
+        score_view[row_content_mask] += row_content / content_mass
+
+    return reallocated_scores
+
+
+def _compute_sink_reallocated_attention_map_torch(
+    attention_map: torch.Tensor,
+    *,
+    is_causal: bool,
+    content_mask: torch.Tensor,
+) -> torch.Tensor:
+    reallocated = torch.zeros_like(attention_map, dtype=torch.float32)
+    n_tokens = attention_map.shape[0]
+
+    for row_index in range(n_tokens):
+        if is_causal:
+            row_visible = attention_map[row_index, : row_index + 1]
+            row_content_mask = content_mask[: row_index + 1]
+            row_view = reallocated[row_index, : row_index + 1]
+        else:
+            row_visible = attention_map[row_index]
+            row_content_mask = content_mask
+            row_view = reallocated[row_index]
+
+        row_content = row_visible[row_content_mask].float()
+        content_mass = row_content.sum()
+        if not bool((content_mass > 1e-10).item()):
+            continue
+        row_view[row_content_mask] = row_content / content_mass
+
+    return reallocated
+
+
+def _compute_debiased_received_scores_torch(
+    received_scores: torch.Tensor,
+    null_received_baseline: torch.Tensor | None,
+    *,
+    gamma: float,
+) -> torch.Tensor | None:
+    if null_received_baseline is None:
+        return None
+    baseline = null_received_baseline.float()
+    if baseline.shape != received_scores.shape:
+        raise ValueError("null_received_baseline must have the same shape as received_scores.")
+    return torch.clamp(received_scores - (float(gamma) * baseline), min=0.0)
+
+
+def _build_bidirectional_attention_mask(
+    attention_mask: torch.Tensor | None,
+    *,
+    inputs_embeds: torch.Tensor,
+) -> torch.Tensor:
+    batch_size, seq_len = inputs_embeds.shape[:2]
+    full_mask = torch.zeros((batch_size, 1, seq_len, seq_len), dtype=inputs_embeds.dtype, device=inputs_embeds.device)
+    if attention_mask is None:
+        return full_mask
+    key_mask = attention_mask[:, None, None, :].to(device=inputs_embeds.device, dtype=torch.bool)
+    min_value = torch.finfo(inputs_embeds.dtype).min
+    return full_mask.masked_fill(~key_mask, min_value)
+
+
+def _patch_qwen3_forward_bidirectional(model: torch.nn.Module):
+    if getattr(model, "_benchmark_original_forward", None) is not None:
+        return lambda: None
+    if getattr(model.config, "model_type", "") != "qwen3":
+        raise ValueError("true_bidirectional_attention currently only supports Qwen3 models in this benchmark.")
+
+    original_forward = model.forward
+
+    def patched_forward(
+        self,
+        input_ids: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | dict | None = None,
+        position_ids: torch.Tensor | None = None,
+        past_key_values=None,
+        inputs_embeds: torch.Tensor | None = None,
+        use_cache: bool | None = None,
+        cache_position: torch.Tensor | None = None,
+        **kwargs,
+    ):
+        if attention_mask is not None and not isinstance(attention_mask, dict):
+            local_inputs_embeds = inputs_embeds
+            if local_inputs_embeds is None:
+                if input_ids is None:
+                    raise ValueError("true_bidirectional_attention requires input_ids or inputs_embeds.")
+                local_inputs_embeds = self.embed_tokens(input_ids)
+            full_mask = _build_bidirectional_attention_mask(attention_mask, inputs_embeds=local_inputs_embeds)
+            attention_mask = {"full_attention": full_mask}
+            if getattr(self, "has_sliding_layers", False):
+                attention_mask["sliding_attention"] = full_mask
+
+        return original_forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            **kwargs,
+        )
+
+    model._benchmark_original_forward = original_forward
+    model.forward = MethodType(patched_forward, model)
+
+    def restore():
+        original = getattr(model, "_benchmark_original_forward", None)
+        if original is None:
+            return
+        model.forward = original
+        delattr(model, "_benchmark_original_forward")
+
+    return restore
+
+
+def _run_attention_forward(
+    model: torch.nn.Module,
+    encoded_inputs: dict[str, torch.Tensor],
+    *,
+    true_bidirectional_attention: bool,
+):
+    restore_forward = None
+    try:
+        if true_bidirectional_attention:
+            restore_forward = _patch_qwen3_forward_bidirectional(model)
+        with torch.no_grad():
+            return model(**encoded_inputs, output_attentions=True)
+    finally:
+        if restore_forward is not None:
+            restore_forward()
+
+
+def _build_noise_token_id_bank(tokenizer) -> np.ndarray:
+    vocab_size = int(len(tokenizer))
+    special_ids = {int(token_id) for token_id in (tokenizer.all_special_ids or []) if token_id is not None and token_id >= 0}
+    token_ids = [token_id for token_id in range(vocab_size) if token_id not in special_ids]
+    if not token_ids:
+        token_ids = list(range(vocab_size))
+    return np.asarray(token_ids, dtype=np.int64)
+
+
+def _build_null_input_ids(
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    word_ids_per_item: Sequence[Sequence[int | None]],
+    *,
+    prefix_word_count: int,
+    noise_token_ids: np.ndarray,
+    rng: np.random.Generator,
+) -> torch.Tensor:
+    if noise_token_ids.size == 0:
+        return input_ids
+
+    noisy_input_ids = input_ids.clone()
+    for item_index, word_ids in enumerate(word_ids_per_item):
+        valid_token_count = int(attention_mask[item_index].sum().item())
+        replace_positions = [
+            token_index
+            for token_index, word_id in enumerate(word_ids[:valid_token_count])
+            if word_id is not None and word_id >= prefix_word_count
+        ]
+        if not replace_positions:
+            continue
+        sampled_ids = rng.choice(noise_token_ids, size=len(replace_positions), replace=True)
+        noisy_input_ids[item_index, replace_positions] = torch.as_tensor(
+            sampled_ids,
+            dtype=noisy_input_ids.dtype,
+            device=noisy_input_ids.device,
+        )
+    return noisy_input_ids
+
+
+def build_model_bundle(
+    model_name: str,
+    device: str,
+    is_causal_override: bool | None = None,
+    true_bidirectional_attention: bool = False,
+) -> dict:
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
     try:
         model = AutoModel.from_pretrained(model_name, output_attentions=True, attn_implementation="eager")
@@ -377,13 +850,20 @@ def build_model_bundle(model_name: str, device: str) -> dict:
         model = AutoModel.from_pretrained(model_name, output_attentions=True)
     model.to(device)
     model.eval()
+    detected_is_causal = _detect_is_causal(model.config)
+    is_causal = detected_is_causal if is_causal_override is None else is_causal_override
     return {
         "tokenizer": tokenizer,
         "model": model,
         "device": device,
+        "max_length": int(getattr(model.config, "max_position_embeddings", 512)),
+        "is_causal": is_causal,
+        "detected_is_causal": detected_is_causal,
+        "true_bidirectional_attention": bool(true_bidirectional_attention),
         "embedding_pooling": _resolve_embedding_pooling(model_name),
         "embedding_cache": OrderedDict(),
         "embedding_cache_max_entries": 20000,
+        "noise_token_ids": _build_noise_token_id_bank(tokenizer),
     }
 
 
@@ -604,8 +1084,22 @@ def _scores_from_attention_map(
     word_ids: List[int | None],
     attention_map: np.ndarray,
     word_count: int,
+    *,
+    is_causal: bool = False,
+    content_mask: np.ndarray | None = None,
+    null_received_baseline: np.ndarray | None = None,
+    null_debias_gamma: float = 1.0,
 ) -> Dict[str, np.ndarray]:
-    cls_scores = attention_map[0]
+    resolved_content_mask = _resolve_content_mask(word_ids, content_mask)
+    if is_causal and content_mask is not None:
+        cls_scores = attention_map[-1].copy()
+        cls_scores[~resolved_content_mask] = 0.0
+        row_sum = cls_scores.sum()
+        if row_sum > 1e-10:
+            cls_scores /= row_sum
+    else:
+        cls_scores = attention_map[0]
+
     received_scores = attention_map.sum(axis=0)
 
     global_scores = received_scores.copy()
@@ -615,13 +1109,62 @@ def _scores_from_attention_map(
     proportional_scores = redistributed.sum(axis=1)
     samrank_scores = global_scores + proportional_scores
     fusion_scores = _normalize_array(cls_scores) * _normalize_array(received_scores)
+    excess_scores = _compute_excess_token_scores(
+        attention_map,
+        is_causal=is_causal,
+        content_mask=resolved_content_mask,
+    )
+    sink_realloc_scores = _compute_sink_reallocated_received_scores(
+        attention_map,
+        is_causal=is_causal,
+        content_mask=resolved_content_mask,
+    )
+    sink_realloc_attention = _compute_sink_reallocated_attention_map(
+        attention_map,
+        is_causal=is_causal,
+        content_mask=resolved_content_mask,
+    )
+    if is_causal and content_mask is not None:
+        sink_realloc_cls_scores = sink_realloc_attention[-1].copy()
+    else:
+        sink_realloc_cls_scores = sink_realloc_attention[0]
+    sink_realloc_received_scores = sink_realloc_attention.sum(axis=0)
+    sink_realloc_global_scores = sink_realloc_received_scores.copy()
+    sink_realloc_redistributed = sink_realloc_attention * sink_realloc_global_scores[None, :]
+    sink_realloc_col_sums = sink_realloc_redistributed.sum(axis=0, keepdims=True) + 1e-10
+    sink_realloc_redistributed = np.divide(
+        sink_realloc_redistributed,
+        sink_realloc_col_sums,
+        out=np.zeros_like(sink_realloc_redistributed),
+        where=sink_realloc_col_sums > 0.0,
+    )
+    sink_realloc_proportional_scores = sink_realloc_redistributed.sum(axis=1)
+    sink_realloc_samrank_scores = sink_realloc_global_scores + sink_realloc_proportional_scores
+    sink_realloc_fusion_scores = _normalize_array(sink_realloc_cls_scores) * _normalize_array(sink_realloc_received_scores)
+    debiased_received_scores = _compute_debiased_received_scores(
+        received_scores,
+        null_received_baseline,
+        gamma=null_debias_gamma,
+    )
 
-    return {
+    results = {
         "cls_attn": _aggregate_subwords_to_words(word_ids, cls_scores, word_count),
         "received_attn": _aggregate_subwords_to_words(word_ids, received_scores, word_count),
         "samrank": _aggregate_subwords_to_words(word_ids, samrank_scores, word_count),
         "fusion_attn": _aggregate_subwords_to_words(word_ids, fusion_scores, word_count),
+        "excess_attn": _aggregate_subwords_to_words(word_ids, excess_scores, word_count),
+        "sink_realloc_attn": _aggregate_subwords_to_words(word_ids, sink_realloc_scores, word_count),
+        "sink_realloc_cls_attn": _aggregate_subwords_to_words(word_ids, sink_realloc_cls_scores, word_count),
+        "sink_realloc_samrank": _aggregate_subwords_to_words(word_ids, sink_realloc_samrank_scores, word_count),
+        "sink_realloc_fusion_attn": _aggregate_subwords_to_words(word_ids, sink_realloc_fusion_scores, word_count),
     }
+    if debiased_received_scores is not None:
+        results["received_attn_debiased"] = _aggregate_subwords_to_words(
+            word_ids,
+            debiased_received_scores,
+            word_count,
+        )
+    return results
 
 
 def _normalize_tensor(values: torch.Tensor) -> torch.Tensor:
@@ -634,13 +1177,293 @@ def _normalize_tensor(values: torch.Tensor) -> torch.Tensor:
     return (values - min_value) / (max_value - min_value)
 
 
+def _extract_cls_scores_torch(
+    attention_map: torch.Tensor,
+    *,
+    is_causal: bool,
+    content_mask: torch.Tensor,
+) -> torch.Tensor:
+    if is_causal:
+        cls_scores = attention_map[-1].clone()
+        cls_scores = cls_scores.masked_fill(~content_mask, 0.0)
+        row_sum = cls_scores.sum()
+        if bool((row_sum > 1e-10).item()):
+            cls_scores = cls_scores / row_sum
+        return cls_scores
+    return attention_map[0]
+
+
+def _compute_head_utility_torch(
+    attention_map: torch.Tensor,
+    *,
+    is_causal: bool,
+    content_mask: torch.Tensor,
+) -> float:
+    n_tokens = attention_map.shape[0]
+    utility = attention_map.new_zeros(())
+
+    for row_index in range(n_tokens):
+        if is_causal:
+            row_visible = attention_map[row_index, : row_index + 1]
+            row_content_mask = content_mask[: row_index + 1]
+        else:
+            row_visible = attention_map[row_index]
+            row_content_mask = content_mask
+
+        visible_content_count = int(row_content_mask.sum().item())
+        if visible_content_count <= 1:
+            continue
+
+        row_content = row_visible[row_content_mask].float()
+        content_mass = row_content.sum()
+        if not bool((content_mass > 1e-10).item()):
+            continue
+
+        p = row_content / content_mass
+        log_visible_content = math.log(visible_content_count)
+        certainty = 0.0
+        if log_visible_content > 1e-10:
+            entropy = -(p * p.clamp_min(1e-10).log()).sum()
+            certainty = max(0.0, 1.0 - (float(entropy.item()) / log_visible_content))
+        utility = utility + content_mass * certainty
+
+    return float((utility / max(n_tokens, 1)).item())
+
+
+def _compute_somp_head_score_torch(
+    attention_map: torch.Tensor,
+    *,
+    content_mask: torch.Tensor,
+    alpha: float,
+    beta: float,
+    local_window: int,
+) -> float:
+    if attention_map.shape[0] == 0:
+        return float("-inf")
+
+    last_row = attention_map[-1].float()
+    row_content_mask = content_mask
+    visible_content_count = int(row_content_mask.sum().item())
+    if visible_content_count <= 1:
+        return float("-inf")
+
+    row_content = last_row[row_content_mask]
+    content_mass = row_content.sum()
+    if not bool((content_mass > 1e-10).item()):
+        return float("-inf")
+
+    normalized_row = row_content / content_mass
+    sharpness = float(normalized_row.var(unbiased=False).item())
+
+    visible_indices = torch.nonzero(row_content_mask, as_tuple=False).flatten()
+    local_count = min(max(int(local_window), 1), visible_indices.numel())
+    local_indices = visible_indices[-local_count:]
+    local_mass = float(last_row[local_indices].sum().item() / content_mass.item())
+    return float(alpha) * sharpness - float(beta) * local_mass
+
+
+def _resolve_cls_head_strategies(strategies: Sequence[str] | None) -> List[str]:
+    if not strategies:
+        return []
+    resolved: List[str] = []
+    for strategy in strategies:
+        normalized = strategy.strip().lower()
+        if not normalized:
+            continue
+        if normalized not in CLS_HEAD_SELECTION_METHOD_NAMES:
+            raise ValueError(f"Unsupported cls head selection strategy: {strategy}")
+        if normalized not in resolved:
+            resolved.append(normalized)
+    return resolved
+
+
+def _compute_cls_head_selection_scores_torch(
+    word_ids: torch.Tensor,
+    attention_heads: torch.Tensor,
+    word_count: int,
+    *,
+    is_causal: bool,
+    content_mask: torch.Tensor,
+    strategies: Sequence[str],
+    top_k: int,
+    temperature: float,
+    somp_alpha: float,
+    somp_beta: float,
+    somp_local_window: int,
+) -> Dict[str, np.ndarray]:
+    resolved_strategies = _resolve_cls_head_strategies(strategies)
+    if not resolved_strategies:
+        return {}
+
+    head_count = int(attention_heads.shape[0])
+    if head_count == 0:
+        return {}
+
+    per_head_cls_scores = []
+    head_utilities = []
+    for head_index in range(head_count):
+        head_attention = attention_heads[head_index].float()
+        per_head_cls_scores.append(
+            _extract_cls_scores_torch(
+                head_attention,
+                is_causal=is_causal,
+                content_mask=content_mask,
+            )
+        )
+        head_utilities.append(
+            _compute_head_utility_torch(
+                head_attention,
+                is_causal=is_causal,
+                content_mask=content_mask,
+            )
+        )
+
+    cls_stack = torch.stack(per_head_cls_scores, dim=0)
+    utility_tensor = torch.as_tensor(head_utilities, dtype=torch.float32, device=attention_heads.device)
+
+    results: Dict[str, np.ndarray] = {}
+    if "topk" in resolved_strategies:
+        keep_count = min(max(int(top_k), 1), head_count)
+        selected = torch.topk(utility_tensor, k=keep_count, largest=True).indices
+        aggregated_scores = cls_stack.index_select(0, selected).mean(dim=0)
+        results["cls_attn_headtopk"] = _aggregate_subwords_to_words_torch(word_ids, aggregated_scores, word_count)
+
+    if "softmax" in resolved_strategies:
+        logits = utility_tensor - utility_tensor.max()
+        weights = torch.softmax(logits * float(temperature), dim=0)
+        aggregated_scores = (cls_stack * weights[:, None]).sum(dim=0)
+        results["cls_attn_headsoftmax"] = _aggregate_subwords_to_words_torch(word_ids, aggregated_scores, word_count)
+
+    if "somp" in resolved_strategies:
+        somp_scores = []
+        for head_index in range(head_count):
+            somp_scores.append(
+                _compute_somp_head_score_torch(
+                    attention_heads[head_index].float(),
+                    content_mask=content_mask,
+                    alpha=somp_alpha,
+                    beta=somp_beta,
+                    local_window=somp_local_window,
+                )
+            )
+        somp_tensor = torch.as_tensor(somp_scores, dtype=torch.float32, device=attention_heads.device)
+        somp_logits = somp_tensor - somp_tensor.max()
+        somp_weights = torch.softmax(somp_logits, dim=0)
+        aggregated_scores = (cls_stack * somp_weights[:, None]).sum(dim=0)
+        results[CLS_HEAD_SELECTION_METHOD_NAMES["somp"]] = _aggregate_subwords_to_words_torch(
+            word_ids,
+            aggregated_scores,
+            word_count,
+        )
+
+    return results
+
+
+def _compute_received_head_selection_scores_torch(
+    word_ids: torch.Tensor,
+    attention_heads: torch.Tensor,
+    word_count: int,
+    *,
+    is_causal: bool,
+    content_mask: torch.Tensor,
+    strategies: Sequence[str],
+    top_k: int,
+    temperature: float,
+    somp_alpha: float,
+    somp_beta: float,
+    somp_local_window: int,
+) -> Dict[str, np.ndarray]:
+    resolved_strategies = _resolve_cls_head_strategies(strategies)
+    if not resolved_strategies:
+        return {}
+
+    head_count = int(attention_heads.shape[0])
+    if head_count == 0:
+        return {}
+
+    per_head_received_scores = []
+    head_utilities = []
+    for head_index in range(head_count):
+        head_attention = attention_heads[head_index].float()
+        per_head_received_scores.append(head_attention.sum(dim=0))
+        head_utilities.append(
+            _compute_head_utility_torch(
+                head_attention,
+                is_causal=is_causal,
+                content_mask=content_mask,
+            )
+        )
+
+    received_stack = torch.stack(per_head_received_scores, dim=0)
+    utility_tensor = torch.as_tensor(head_utilities, dtype=torch.float32, device=attention_heads.device)
+
+    results: Dict[str, np.ndarray] = {}
+    if "topk" in resolved_strategies:
+        keep_count = min(max(int(top_k), 1), head_count)
+        selected = torch.topk(utility_tensor, k=keep_count, largest=True).indices
+        aggregated_scores = received_stack.index_select(0, selected).mean(dim=0)
+        results[RECEIVED_HEAD_SELECTION_METHOD_NAMES["topk"]] = _aggregate_subwords_to_words_torch(
+            word_ids,
+            aggregated_scores,
+            word_count,
+        )
+
+    if "softmax" in resolved_strategies:
+        logits = utility_tensor - utility_tensor.max()
+        weights = torch.softmax(logits * float(temperature), dim=0)
+        aggregated_scores = (received_stack * weights[:, None]).sum(dim=0)
+        results[RECEIVED_HEAD_SELECTION_METHOD_NAMES["softmax"]] = _aggregate_subwords_to_words_torch(
+            word_ids,
+            aggregated_scores,
+            word_count,
+        )
+
+    if "somp" in resolved_strategies:
+        somp_scores = []
+        for head_index in range(head_count):
+            somp_scores.append(
+                _compute_somp_head_score_torch(
+                    attention_heads[head_index].float(),
+                    content_mask=content_mask,
+                    alpha=somp_alpha,
+                    beta=somp_beta,
+                    local_window=somp_local_window,
+                )
+            )
+        somp_tensor = torch.as_tensor(somp_scores, dtype=torch.float32, device=attention_heads.device)
+        somp_logits = somp_tensor - somp_tensor.max()
+        somp_weights = torch.softmax(somp_logits, dim=0)
+        aggregated_scores = (received_stack * somp_weights[:, None]).sum(dim=0)
+        results[RECEIVED_HEAD_SELECTION_METHOD_NAMES["somp"]] = _aggregate_subwords_to_words_torch(
+            word_ids,
+            aggregated_scores,
+            word_count,
+        )
+
+    return results
+
+
 def _scores_from_attention_map_torch(
     word_ids: torch.Tensor,
     attention_map: torch.Tensor,
     word_count: int,
+    *,
+    is_causal: bool = False,
+    content_mask: torch.Tensor | None = None,
+    null_received_baseline: torch.Tensor | None = None,
+    null_debias_gamma: float = 1.0,
 ) -> Dict[str, np.ndarray]:
     attention = attention_map.float()
-    cls_scores = attention[0]
+    if content_mask is None:
+        content_mask = word_ids >= 0
+    if is_causal and content_mask is not None:
+        cls_scores = attention[-1].clone()
+        cls_scores = cls_scores.masked_fill(~content_mask, 0.0)
+        row_sum = cls_scores.sum()
+        if bool((row_sum > 1e-10).item()):
+            cls_scores = cls_scores / row_sum
+    else:
+        cls_scores = attention[0]
     received_scores = attention.sum(dim=0)
 
     global_scores = received_scores
@@ -649,13 +1472,57 @@ def _scores_from_attention_map_torch(
     proportional_scores = redistributed.sum(dim=1)
     samrank_scores = global_scores + proportional_scores
     fusion_scores = _normalize_tensor(cls_scores) * _normalize_tensor(received_scores)
+    excess_scores = _compute_excess_token_scores_torch(
+        attention,
+        is_causal=is_causal,
+        content_mask=content_mask,
+    )
+    sink_realloc_scores = _compute_sink_reallocated_received_scores_torch(
+        attention,
+        is_causal=is_causal,
+        content_mask=content_mask,
+    )
+    sink_realloc_attention = _compute_sink_reallocated_attention_map_torch(
+        attention,
+        is_causal=is_causal,
+        content_mask=content_mask,
+    )
+    sink_realloc_cls_scores = _extract_cls_scores_torch(
+        sink_realloc_attention,
+        is_causal=is_causal,
+        content_mask=content_mask,
+    )
+    sink_realloc_received_scores = sink_realloc_attention.sum(dim=0)
+    sink_realloc_global_scores = sink_realloc_received_scores
+    sink_realloc_redistributed = sink_realloc_attention * sink_realloc_global_scores.unsqueeze(0)
+    sink_realloc_redistributed = sink_realloc_redistributed / sink_realloc_redistributed.sum(dim=0, keepdim=True).clamp_min(1e-10)
+    sink_realloc_proportional_scores = sink_realloc_redistributed.sum(dim=1)
+    sink_realloc_samrank_scores = sink_realloc_global_scores + sink_realloc_proportional_scores
+    sink_realloc_fusion_scores = _normalize_tensor(sink_realloc_cls_scores) * _normalize_tensor(sink_realloc_received_scores)
+    debiased_received_scores = _compute_debiased_received_scores_torch(
+        received_scores,
+        null_received_baseline,
+        gamma=null_debias_gamma,
+    )
 
-    return {
+    results = {
         "cls_attn": _aggregate_subwords_to_words_torch(word_ids, cls_scores, word_count),
         "received_attn": _aggregate_subwords_to_words_torch(word_ids, received_scores, word_count),
         "samrank": _aggregate_subwords_to_words_torch(word_ids, samrank_scores, word_count),
         "fusion_attn": _aggregate_subwords_to_words_torch(word_ids, fusion_scores, word_count),
+        "excess_attn": _aggregate_subwords_to_words_torch(word_ids, excess_scores, word_count),
+        "sink_realloc_attn": _aggregate_subwords_to_words_torch(word_ids, sink_realloc_scores, word_count),
+        "sink_realloc_cls_attn": _aggregate_subwords_to_words_torch(word_ids, sink_realloc_cls_scores, word_count),
+        "sink_realloc_samrank": _aggregate_subwords_to_words_torch(word_ids, sink_realloc_samrank_scores, word_count),
+        "sink_realloc_fusion_attn": _aggregate_subwords_to_words_torch(word_ids, sink_realloc_fusion_scores, word_count),
     }
+    if debiased_received_scores is not None:
+        results["received_attn_debiased"] = _aggregate_subwords_to_words_torch(
+            word_ids,
+            debiased_received_scores,
+            word_count,
+        )
+    return results
 
 
 def _aggregate_layer_word_scores(
@@ -680,6 +1547,47 @@ def _aggregate_layer_word_scores(
     return aggregated
 
 
+def _compute_hidden_position_scaled_scores_torch(
+    word_ids: torch.Tensor,
+    hidden_states: torch.Tensor,
+    word_count: int,
+    *,
+    content_mask: torch.Tensor,
+    top_k: int,
+    scale_factor: float,
+) -> Dict[str, np.ndarray]:
+    if top_k <= 0 or word_count <= 0:
+        return {}
+
+    effective_mask = content_mask if content_mask is not None else (word_ids >= 0)
+    content_states = hidden_states[effective_mask].float()
+    if content_states.shape[0] < 3:
+        return {}
+
+    hidden_dim = int(content_states.shape[-1])
+    keep_count = min(max(int(top_k), 1), hidden_dim)
+    positions = torch.linspace(-1.0, 1.0, steps=int(content_states.shape[0]), device=content_states.device, dtype=content_states.dtype)
+    position_centered = positions - positions.mean()
+    state_centered = content_states - content_states.mean(dim=0, keepdim=True)
+    cov = (state_centered * position_centered[:, None]).mean(dim=0)
+    state_std = state_centered.pow(2).mean(dim=0).sqrt()
+    position_std = position_centered.pow(2).mean().sqrt()
+    position_corr = cov.abs() / (state_std * position_std + 1e-6)
+    scaled_states = hidden_states.float().clone()
+    damped_dims = torch.topk(position_corr, k=keep_count, largest=True).indices
+    scaled_states[:, damped_dims] *= float(scale_factor)
+
+    scaled_content_states = scaled_states[effective_mask]
+    doc_state = scaled_content_states.mean(dim=0, keepdim=True)
+    token_vectors = torch.nn.functional.normalize(scaled_states, dim=1)
+    doc_vector = torch.nn.functional.normalize(doc_state, dim=1)
+    token_scores = (token_vectors * doc_vector).sum(dim=1)
+    token_scores = token_scores.masked_fill(~effective_mask, 0.0)
+    return {
+        "hidden_posscale": _aggregate_subwords_to_words_torch(word_ids, token_scores, word_count),
+    }
+
+
 def batched_attention_word_scores(
     batch_words: Sequence[Sequence[str]],
     model_bundle: dict,
@@ -687,6 +1595,19 @@ def batched_attention_word_scores(
     batch_size: int = 4,
     progress_label: str | None = None,
     log_every_batches: int = 0,
+    *,
+    batch_pos_tags: Sequence[Sequence[str]] | None = None,
+    language: str = "zh",
+    instruction_prefix: str | None = None,
+    cls_head_strategies: Sequence[str] | None = None,
+    cls_head_top_k: int = 4,
+    cls_head_temperature: float = 8.0,
+    somp_alpha: float = 512.0,
+    somp_beta: float = 1.0,
+    somp_local_window: int = 8,
+    null_debias_samples: int = 0,
+    null_debias_gamma: float = 1.0,
+    null_debias_seed: int = 13,
 ) -> List[Dict[int, Dict[str, np.ndarray]]]:
     if not batch_words:
         return []
@@ -694,17 +1615,221 @@ def batched_attention_word_scores(
     tokenizer = model_bundle["tokenizer"]
     model = model_bundle["model"]
     device = model_bundle["device"]
+    is_causal = bool(model_bundle.get("is_causal", False))
+    max_length = int(model_bundle.get("max_length", 512))
+    prefix_words, prefix_pos_tags = _tokenize_instruction_prefix(instruction_prefix, language)
+    resolved_head_strategies = _resolve_cls_head_strategies(cls_head_strategies)
+    true_bidirectional_attention = bool(model_bundle.get("true_bidirectional_attention", False))
+    null_debias_enabled = int(null_debias_samples) > 0
+    null_rng = np.random.default_rng(null_debias_seed)
+    noise_token_ids = np.asarray(model_bundle.get("noise_token_ids", np.zeros(0, dtype=np.int64)), dtype=np.int64)
 
     results: List[Dict[int, Dict[str, np.ndarray]]] = []
     total_batches = max(math.ceil(len(batch_words) / batch_size), 1)
     for batch_index, start in enumerate(range(0, len(batch_words), batch_size), start=1):
-        word_batch = [list(words) for words in batch_words[start : start + batch_size]]
+        content_word_batch = [list(words) for words in batch_words[start : start + batch_size]]
+        pos_tag_batch = (
+            [list(pt) for pt in batch_pos_tags[start : start + batch_size]]
+            if batch_pos_tags is not None
+            else None
+        )
+        word_batch = [prefix_words + words for words in content_word_batch]
+        combined_pos_tag_batch = None
+        if pos_tag_batch is not None:
+            combined_pos_tag_batch = [prefix_pos_tags + pos_tags for pos_tags in pos_tag_batch]
         encoded = tokenizer(
             word_batch,
             is_split_into_words=True,
             padding=True,
             truncation=True,
-            max_length=512,
+            max_length=max_length,
+            return_tensors="pt",
+        )
+        word_ids_per_item = [encoded.word_ids(batch_index=index) for index in range(len(word_batch))]
+        encoded = {key: value.to(device) for key, value in encoded.items()}
+        valid_token_counts = [int(encoded["attention_mask"][index].sum().item()) for index in range(len(word_batch))]
+        word_id_tensors = [
+            _word_ids_to_tensor(word_ids_per_item[index][: valid_token_counts[index]], device)
+            for index in range(len(word_batch))
+        ]
+
+        outputs = _run_attention_forward(
+            model,
+            encoded,
+            true_bidirectional_attention=true_bidirectional_attention,
+        )
+
+        layer_count = len(outputs.attentions)
+        resolved_indices = {layer_index: _resolve_layer_index(layer_index, layer_count) for layer_index in layer_indices}
+        per_item_scores_list: List[Dict[int, Dict[str, np.ndarray]]] = [dict() for _ in word_batch]
+        null_received_baselines: dict[int, list[torch.Tensor]] = {}
+
+        if null_debias_enabled:
+            null_accumulators = {
+                layer_index: [
+                    torch.zeros(valid_token_counts[item_index], dtype=torch.float32, device=device)
+                    for item_index in range(len(word_batch))
+                ]
+                for layer_index in resolved_indices
+            }
+            prefix_word_count = len(prefix_words)
+            for _ in range(int(null_debias_samples)):
+                noisy_input_ids = _build_null_input_ids(
+                    encoded["input_ids"],
+                    encoded["attention_mask"],
+                    word_ids_per_item,
+                    prefix_word_count=prefix_word_count,
+                    noise_token_ids=noise_token_ids,
+                    rng=null_rng,
+                )
+                noisy_encoded = dict(encoded)
+                noisy_encoded["input_ids"] = noisy_input_ids
+                noisy_outputs = _run_attention_forward(
+                    model,
+                    noisy_encoded,
+                    true_bidirectional_attention=true_bidirectional_attention,
+                )
+                for layer_index, resolved_index in resolved_indices.items():
+                    noisy_layer_attention = noisy_outputs.attentions[resolved_index].mean(dim=1).detach()
+                    for item_index in range(len(word_batch)):
+                        valid_token_count = valid_token_counts[item_index]
+                        null_accumulators[layer_index][item_index] += noisy_layer_attention[
+                            item_index,
+                            :valid_token_count,
+                            :valid_token_count,
+                        ].sum(dim=0).float()
+                    del noisy_layer_attention
+                del noisy_outputs
+            sample_scale = float(max(int(null_debias_samples), 1))
+            null_received_baselines = {
+                layer_index: [baseline / sample_scale for baseline in baselines]
+                for layer_index, baselines in null_accumulators.items()
+            }
+
+        for layer_index, resolved_index in resolved_indices.items():
+            layer_outputs = outputs.attentions[resolved_index].detach()
+            layer_attention = layer_outputs.mean(dim=1)
+            prefix_word_count = len(prefix_words)
+            for item_index, words in enumerate(word_batch):
+                valid_token_count = valid_token_counts[item_index]
+                attention_map = layer_attention[item_index, :valid_token_count, :valid_token_count]
+                content_mask = None
+                if is_causal and combined_pos_tag_batch is not None:
+                    content_mask_np = _build_content_mask(
+                        word_ids_per_item[item_index][:valid_token_count],
+                        words,
+                        combined_pos_tag_batch[item_index],
+                        language,
+                    )
+                    content_mask = torch.as_tensor(content_mask_np, dtype=torch.bool, device=device)
+                combined_scores = _scores_from_attention_map_torch(
+                    word_id_tensors[item_index],
+                    attention_map,
+                    len(words),
+                    is_causal=is_causal,
+                    content_mask=content_mask,
+                    null_received_baseline=(
+                        null_received_baselines.get(layer_index, [None] * len(word_batch))[item_index]
+                        if null_debias_enabled
+                        else None
+                    ),
+                    null_debias_gamma=null_debias_gamma,
+                )
+                if resolved_head_strategies:
+                    head_attention = layer_outputs[item_index, :, :valid_token_count, :valid_token_count]
+                    effective_content_mask = content_mask if content_mask is not None else (word_id_tensors[item_index] >= 0)
+                    combined_scores.update(
+                        _compute_cls_head_selection_scores_torch(
+                            word_id_tensors[item_index],
+                            head_attention,
+                            len(words),
+                            is_causal=is_causal,
+                            content_mask=effective_content_mask,
+                            strategies=resolved_head_strategies,
+                            top_k=cls_head_top_k,
+                            temperature=cls_head_temperature,
+                            somp_alpha=somp_alpha,
+                            somp_beta=somp_beta,
+                            somp_local_window=somp_local_window,
+                        )
+                    )
+                    combined_scores.update(
+                        _compute_received_head_selection_scores_torch(
+                            word_id_tensors[item_index],
+                            head_attention,
+                            len(words),
+                            is_causal=is_causal,
+                            content_mask=effective_content_mask,
+                            strategies=resolved_head_strategies,
+                            top_k=cls_head_top_k,
+                            temperature=cls_head_temperature,
+                            somp_alpha=somp_alpha,
+                            somp_beta=somp_beta,
+                            somp_local_window=somp_local_window,
+                        )
+                    )
+                content_word_count = len(content_word_batch[item_index])
+                per_item_scores_list[item_index][layer_index] = {
+                    method_name: method_scores[prefix_word_count : prefix_word_count + content_word_count]
+                    for method_name, method_scores in combined_scores.items()
+                }
+            del layer_attention
+
+        results.extend(per_item_scores_list)
+        del outputs
+        if progress_label and (
+            batch_index == 1
+            or batch_index == total_batches
+            or (log_every_batches > 0 and batch_index % log_every_batches == 0)
+        ):
+            print(f"[{progress_label}] batch {batch_index}/{total_batches}")
+    return results
+
+
+def batched_hidden_word_scores(
+    batch_words: Sequence[Sequence[str]],
+    model_bundle: dict,
+    layer_indices: Sequence[int],
+    batch_size: int = 4,
+    progress_label: str | None = None,
+    log_every_batches: int = 0,
+    *,
+    batch_pos_tags: Sequence[Sequence[str]] | None = None,
+    language: str = "zh",
+    instruction_prefix: str | None = None,
+    hidden_pos_top_k: int = 0,
+    hidden_pos_scale_factor: float = 0.25,
+) -> List[Dict[int, Dict[str, np.ndarray]]]:
+    if not batch_words or int(hidden_pos_top_k) <= 0:
+        return []
+
+    tokenizer = model_bundle["tokenizer"]
+    model = model_bundle["model"]
+    device = model_bundle["device"]
+    is_causal = bool(model_bundle.get("is_causal", False))
+    max_length = int(model_bundle.get("max_length", 512))
+    prefix_words, prefix_pos_tags = _tokenize_instruction_prefix(instruction_prefix, language)
+
+    results: List[Dict[int, Dict[str, np.ndarray]]] = []
+    total_batches = max(math.ceil(len(batch_words) / batch_size), 1)
+    for batch_index, start in enumerate(range(0, len(batch_words), batch_size), start=1):
+        content_word_batch = [list(words) for words in batch_words[start : start + batch_size]]
+        pos_tag_batch = (
+            [list(pt) for pt in batch_pos_tags[start : start + batch_size]]
+            if batch_pos_tags is not None
+            else None
+        )
+        word_batch = [prefix_words + words for words in content_word_batch]
+        combined_pos_tag_batch = None
+        if pos_tag_batch is not None:
+            combined_pos_tag_batch = [prefix_pos_tags + pos_tags for pos_tags in pos_tag_batch]
+
+        encoded = tokenizer(
+            word_batch,
+            is_split_into_words=True,
+            padding=True,
+            truncation=True,
+            max_length=max_length,
             return_tensors="pt",
         )
         word_ids_per_item = [encoded.word_ids(batch_index=index) for index in range(len(word_batch))]
@@ -716,23 +1841,43 @@ def batched_attention_word_scores(
         ]
 
         with torch.no_grad():
-            outputs = model(**encoded, output_attentions=True)
+            outputs = model(**encoded, output_attentions=False, output_hidden_states=True)
 
-        layer_count = len(outputs.attentions)
+        layer_count = len(outputs.hidden_states) - 1
         resolved_indices = {layer_index: _resolve_layer_index(layer_index, layer_count) for layer_index in layer_indices}
         per_item_scores_list: List[Dict[int, Dict[str, np.ndarray]]] = [dict() for _ in word_batch]
 
         for layer_index, resolved_index in resolved_indices.items():
-            layer_attention = outputs.attentions[resolved_index].mean(dim=1).detach()
+            layer_hidden = outputs.hidden_states[resolved_index + 1].detach()
+            prefix_word_count = len(prefix_words)
             for item_index, words in enumerate(word_batch):
                 valid_token_count = valid_token_counts[item_index]
-                attention_map = layer_attention[item_index, :valid_token_count, :valid_token_count]
-                per_item_scores_list[item_index][layer_index] = _scores_from_attention_map_torch(
+                token_hidden = layer_hidden[item_index, :valid_token_count, :]
+                content_mask = None
+                if is_causal and combined_pos_tag_batch is not None:
+                    content_mask_np = _build_content_mask(
+                        word_ids_per_item[item_index][:valid_token_count],
+                        words,
+                        combined_pos_tag_batch[item_index],
+                        language,
+                    )
+                    content_mask = torch.as_tensor(content_mask_np, dtype=torch.bool, device=device)
+                else:
+                    content_mask = word_id_tensors[item_index] >= 0
+                hidden_scores = _compute_hidden_position_scaled_scores_torch(
                     word_id_tensors[item_index],
-                    attention_map,
+                    token_hidden,
                     len(words),
+                    content_mask=content_mask,
+                    top_k=hidden_pos_top_k,
+                    scale_factor=hidden_pos_scale_factor,
                 )
-            del layer_attention
+                content_word_count = len(content_word_batch[item_index])
+                per_item_scores_list[item_index][layer_index] = {
+                    method_name: method_scores[prefix_word_count : prefix_word_count + content_word_count]
+                    for method_name, method_scores in hidden_scores.items()
+                }
+            del layer_hidden
 
         results.extend(per_item_scores_list)
         del outputs
@@ -751,6 +1896,16 @@ def attention_word_scores(
     layer_index: int = -1,
     layer_indices: Sequence[int] | None = None,
     layer_weights: Sequence[float] | None = None,
+    *,
+    pos_tags: Sequence[str] | None = None,
+    language: str = "zh",
+    instruction_prefix: str | None = None,
+    cls_head_strategies: Sequence[str] | None = None,
+    cls_head_top_k: int = 4,
+    cls_head_temperature: float = 8.0,
+    somp_alpha: float = 512.0,
+    somp_beta: float = 1.0,
+    somp_local_window: int = 8,
 ) -> Dict[str, np.ndarray]:
     effective_layer_indices = list(layer_indices) if layer_indices else [layer_index]
     batched_scores = batched_attention_word_scores(
@@ -758,6 +1913,15 @@ def attention_word_scores(
         model_bundle,
         layer_indices=effective_layer_indices,
         batch_size=1,
+        batch_pos_tags=[list(pos_tags)] if pos_tags is not None else None,
+        language=language,
+        instruction_prefix=instruction_prefix,
+        cls_head_strategies=cls_head_strategies,
+        cls_head_top_k=cls_head_top_k,
+        cls_head_temperature=cls_head_temperature,
+        somp_alpha=somp_alpha,
+        somp_beta=somp_beta,
+        somp_local_window=somp_local_window,
     )
     if not batched_scores:
         return {}

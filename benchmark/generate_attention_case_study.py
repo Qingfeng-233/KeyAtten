@@ -15,6 +15,7 @@ from keyword_bench.methods import (
     keybert_word_scores,
     segment_text,
 )
+from keyword_bench.output_paths import resolve_output_dir
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", required=True, help="HF model name or local model path.")
     parser.add_argument("--doc-ids", nargs="*", default=[], help="Specific doc ids to visualize.")
     parser.add_argument("--doc-limit", type=int, default=3, help="Number of documents to export when doc ids are omitted.")
-    parser.add_argument("--output-dir", default="outputs_case_study", help="Directory for JSON and PNG outputs.")
+    parser.add_argument("--output-dir", default="outputs_case_study", help="Directory for JSON and PNG outputs. Relative paths resolve under 测试沙箱/Outputs.")
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
         "--attention-layer-spec",
@@ -113,7 +114,7 @@ def render_heatmap(words: list[str], left_scores: np.ndarray, right_scores: np.n
 def main() -> None:
     args = parse_args()
     root_dir = Path(args.root_dir).resolve()
-    output_dir = (root_dir / args.output_dir).resolve()
+    output_dir = resolve_output_dir(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     all_eval_sets = build_all_eval_sets(root_dir)

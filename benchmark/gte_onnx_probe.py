@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from transformers import AutoModel, AutoTokenizer
+from keyword_bench.output_paths import resolve_output_path
 
 try:
     import onnx  # noqa: F401
@@ -71,8 +72,7 @@ def word_received_scores(attention_map: np.ndarray, word_ids: list[int | None], 
 
 def main() -> None:
     args = parse_args()
-    output_path = Path(args.output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = resolve_output_path(args.output_path)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, use_fast=True)
     try:

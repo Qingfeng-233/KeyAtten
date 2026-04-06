@@ -561,6 +561,94 @@ def merge_single_chars(
     return merged_words, merged_pos, merge_map, changed
 
 
+_GRAVITY_BOUNDARY_RE = re.compile(
+    r"^[\W_《》\u300a\u300b\u201c\u201d「」\s]+|[\W_《》\u300a\u300b\u201c\u201d「」\s]+$",
+    re.UNICODE,
+)
+_GRAVITY_FUNC_WORDS_ZH = ("的", "了", "和", "与", "是", "在", "有", "被", "把", "对")
+_GRAVITY_INNER_PUNCT_RE = re.compile(r"[，。！？、；：\s]")
+
+
+def gravity_candidates(
+    text: str,
+    token_scores: Sequence[float],
+    token_offsets: Sequence[tuple[int, int]],
+    *,
+    threshold_ratio: float = 0.5,
+    min_length: int = 2,
+    max_length: int = 12,
+) -> tuple[list[Candidate], list[tuple[int, int]]]:
+    """Extract candidates from contiguous high-scoring token spans.
+
+    Finds runs of tokens whose scores exceed a dynamic threshold
+    (median + threshold_ratio * (max - median)), trims punctuation and
+    function words from span boundaries, and returns deduplicated
+    ``Candidate`` objects with their character spans.
+
+    Args:
+        text: Original document text (without instruction prefix).
+        token_scores: Per-token QK / attention scores aligned with *token_offsets*.
+        token_offsets: ``(char_start, char_end)`` pairs into *text* for each token.
+        threshold_ratio: How far between median and max to set the threshold (0–1).
+        min_length: Minimum character length for a gravity candidate.
+        max_length: Maximum character length for a gravity candidate.
+
+    Returns:
+        A tuple of ``(candidates, char_spans)`` where each candidate has
+        ``word_start = word_end = -1`` (not aligned to jieba words).
+    """
+    scores = np.asarray(token_scores, dtype=np.float32)
+    if scores.size == 0:
+        return [], []
+
+    median_score = float(np.median(scores))
+    max_score = float(np.max(scores))
+    threshold = median_score + threshold_ratio * (max_score - median_score)
+
+    raw_spans: list[tuple[str, int, int]] = []
+    i = 0
+    n = len(scores)
+    while i < n:
+        if scores[i] >= threshold:
+            j = i
+            while j < n and scores[j] >= threshold:
+                j += 1
+            char_start = token_offsets[i][0]
+            char_end = token_offsets[j - 1][1]
+            span_text = text[char_start:char_end]
+            raw_spans.append((span_text, char_start, char_end))
+            i = j
+        else:
+            i += 1
+
+    candidates: list[Candidate] = []
+    char_spans: list[tuple[int, int]] = []
+    seen: set[str] = set()
+
+    for span_text, _cs, _ce in raw_spans:
+        cleaned = _GRAVITY_BOUNDARY_RE.sub("", span_text)
+        for fw in _GRAVITY_FUNC_WORDS_ZH:
+            if cleaned.startswith(fw) and len(cleaned) > len(fw):
+                cleaned = cleaned[len(fw):]
+            if cleaned.endswith(fw) and len(cleaned) > len(fw):
+                cleaned = cleaned[:-len(fw)]
+        if len(cleaned) < min_length or len(cleaned) > max_length:
+            continue
+        if _GRAVITY_INNER_PUNCT_RE.search(cleaned):
+            continue
+        real_start = text.find(cleaned, _cs)
+        if real_start < 0:
+            continue
+        normalized = normalize_phrase(cleaned)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        candidates.append(Candidate(text=cleaned, word_start=-1, word_end=-1))
+        char_spans.append((real_start, real_start + len(cleaned)))
+
+    return candidates, char_spans
+
+
 __all__ = [
     "Candidate",
     "WordWeight",
@@ -580,4 +668,5 @@ __all__ = [
     "candidate_rank_from_word_scores",
     "candidate_rank_from_token_scores",
     "merge_single_chars",
+    "gravity_candidates",
 ]

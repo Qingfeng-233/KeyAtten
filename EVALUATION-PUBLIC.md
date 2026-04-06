@@ -197,11 +197,42 @@ Model scale is not the only factor: Qwen3.5-0.8B outperforms the 2B version on n
 
 ---
 
+## QK Contrastive LoRA (Experimental)
+
+### 2026-04-06 Update
+
+A lightweight QK Contrastive LoRA fine-tuning approach has been validated on `Qwen/Qwen3-Embedding-0.6B`. By fine-tuning only the Q and K projection layers (LoRA rank 8, ~0.6M trainable parameters), the model learns to produce QK dot-product scores that directly rank keyword tokens higher.
+
+**Training**: 10,769 documents (CSL + ShenCeCup + Multi-Domain), extractive-filtered, 6 epochs, best adapter selected on dev F1@10.
+
+| Dataset | Method | F1@5 | F1@10 |
+|---------|--------|:---:|:---:|
+| ShenCeCup (held-out) | QK LoRA | **0.4247** | **0.3185** |
+| ShenCeCup (held-out) | `cls_attn_idf` (zero-shot) | 0.3430 | 0.2579 |
+| CSL test | QK LoRA | 0.1394 | 0.1561 |
+
+- **ShenCeCup F1@5 = 0.4247**: +24% over the best zero-shot method (`cls_attn_idf`), approaching LLM-level performance (Gemini flash-lite = 0.4810)
+- CSL performance is lower, likely due to domain mismatch in training data composition
+- IDF post-processing degrades QK LoRA scores; the raw QK signal is already well-calibrated
+
+The best adapter is archived at [`benchmark/qk_lora_adapter/best_adapter/`](./benchmark/qk_lora_adapter/).
+
+> **Note**: This result was obtained with limited compute (6 epochs on a single GPU). With more training epochs and larger-scale hardware, further improvement is expected.
+
+### Attention Gravity
+
+A new `gravity_candidates` feature has been added to the main library. It uses contiguous high-scoring token spans from the attention signal to discover keyword candidates that segmentation tools (e.g., jieba) miss — such as novel proper nouns, character names, or domain-specific terms not in any dictionary.
+
+Usage: set `enable_gravity=True` with `candidate_scoring="token_span"` in `KeyAttenExtractor`.
+
+---
+
 ## Scenario Guide
 
 | Scenario | Recommended Method | Expected F1@10 | vs Traditional Baseline |
 |----------|-------------------|:---:|:---:|
 | Chinese News | `samrank` | ~0.25 | +67% |
+| Chinese News (with LoRA) | QK LoRA | ~0.32 | +107% |
 | Chinese Academic | `samrank_idf` | ~0.21 | +9% |
 | English Long Documents | `cls_attn_idf` | ~0.13 | +78%–79% |
 | Tag Clouds / Summaries | `cls_attn` | — | Highest distinctiveness |

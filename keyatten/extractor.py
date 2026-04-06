@@ -21,8 +21,11 @@ from .candidates import (
     candidate_char_spans,
     candidate_rank_from_token_scores,
     candidate_rank_from_word_scores,
+    candidate_score_values_from_token_spans,
+    gravity_candidates,
     locate_word_offsets,
     merge_single_chars,
+    rank_candidates_from_scores,
     segment_text,
     token_values_from_word_values,
 )
@@ -50,7 +53,9 @@ class KeyAttenExtractor:
         instruction_prefix: str | None = None,
         is_causal_override: bool | None = None,
         dedup_nested_for_topk5: bool = False,
+        dedup_nested: bool = False,
         candidate_scoring: str = "word",
+        enable_gravity: bool = False,
     ) -> None:
         if not model:
             raise ValueError("model is required.")
@@ -71,6 +76,8 @@ class KeyAttenExtractor:
             raise ValueError("candidate_scoring must be one of {'word', 'token_span'}.")
         if attn_merge and candidate_scoring == "token_span":
             raise ValueError("candidate_scoring='token_span' does not support attn_merge.")
+        if enable_gravity and candidate_scoring != "token_span":
+            raise ValueError("enable_gravity requires candidate_scoring='token_span'.")
 
         self.model = model
         self.language = language
@@ -86,7 +93,9 @@ class KeyAttenExtractor:
         self.instruction_prefix = instruction_prefix
         self.is_causal_override = is_causal_override
         self.dedup_nested_for_topk5 = dedup_nested_for_topk5
+        self.dedup_nested = dedup_nested
         self.candidate_scoring = candidate_scoring
+        self.enable_gravity = enable_gravity
         self.model_bundle: dict | None = None
         self.idf_lookup: dict[str, float] | None = None
 
@@ -169,6 +178,27 @@ class KeyAttenExtractor:
             tfidf_word_scores = self._tfidf_word_scores(words, pos_tags, token_counts, lookup)
             tfidf_token_scores = token_values_from_word_values(token_offsets, word_offsets, tfidf_word_scores)
             token_scores = combine_word_scores(token_scores, tfidf_token_scores, mode="product")
+
+        if self.enable_gravity:
+            all_candidates = list(candidates)
+            all_spans = list(candidate_spans)
+            existing_normalized = {c.text.lower() for c in all_candidates}
+            gravity_cands, gravity_spans = gravity_candidates(
+                text, token_scores, token_offsets,
+            )
+            for gc, gs in zip(gravity_cands, gravity_spans):
+                if gc.text.lower() not in existing_normalized:
+                    all_candidates.append(gc)
+                    all_spans.append(gs)
+                    existing_normalized.add(gc.text.lower())
+            all_scores = candidate_score_values_from_token_spans(
+                all_spans, token_offsets, token_scores, aggregation_mode="mean",
+            )
+            return rank_candidates_from_scores(
+                all_candidates, all_scores,
+                top_k=top_k,
+                dedup_nested=self._use_nested_dedup(top_k),
+            )
 
         return candidate_rank_from_token_scores(
             candidates,
@@ -520,6 +550,8 @@ class KeyAttenExtractor:
         return None
 
     def _use_nested_dedup(self, top_k: int) -> bool:
+        if self.dedup_nested:
+            return True
         return self.dedup_nested_for_topk5 and int(top_k) <= 5
 
     @staticmethod
@@ -550,7 +582,9 @@ def extract_keywords(
     instruction_prefix: str | None = None,
     is_causal_override: bool | None = None,
     dedup_nested_for_topk5: bool = False,
+    dedup_nested: bool = False,
     candidate_scoring: str = "word",
+    enable_gravity: bool = False,
 ) -> list[str]:
     extractor = KeyAttenExtractor(
         model=model,
@@ -563,7 +597,9 @@ def extract_keywords(
         instruction_prefix=instruction_prefix,
         is_causal_override=is_causal_override,
         dedup_nested_for_topk5=dedup_nested_for_topk5,
+        dedup_nested=dedup_nested,
         candidate_scoring=candidate_scoring,
+        enable_gravity=enable_gravity,
     )
     return extractor.extract_keywords(
         text=text,
