@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "KeyAtten: Attention-based Keyword Extraction"
+version: 0.2.0
+date-released: 2026-04-07
+license: MIT
+url: "https://github.com/Qingfeng-233/KeyAtten"
+repository-code: "https://github.com/Qingfeng-233/KeyAtten"
+authors:
+  - family-names: Jiang
+    given-names: Linhao
+    email: 2986487865@qq.com
+keywords:
+  - keyword extraction
+  - keyphrase extraction
+  - attention mechanism
+  - NLP
+  - transformer
+  - unsupervised
+abstract: >-
+  Attention-based keyword extraction framework. Zero training, zero labeling,
+  single forward pass. Supports Chinese and English. Evaluated on 7 public
+  datasets against 14 methods. Includes QK LoRA fine-tuning on
+  Qwen3-Embedding-0.6B, outperforming Gemini flash-lite by +14% F1@10
+  with ~500x faster inference.
