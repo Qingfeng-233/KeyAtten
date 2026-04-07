@@ -309,6 +309,10 @@ The `samrank` method in this project references the ranking formula from:
 
 `cls_attn`, `received_attn`, `fusion_attn` and all `_idf` hybrid strategies are original to this project.
 
+## Acknowledgments
+
+Thanks to the [LinuxDo](https://linux.do) community for their support.
+
 ## License
 
 [MIT](./LICENSE)

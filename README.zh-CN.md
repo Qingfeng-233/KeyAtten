@@ -309,6 +309,10 @@ KeyAttenExtractor(
 
 `cls_attn`、`received_attn`、`fusion_attn` 及所有 `_idf` 混合策略为本项目原创。
 
+## 致谢
+
+感谢 [LinuxDo](https://linux.do) 社区的支持。
+
 ## 许可证
 
 [MIT](./LICENSE)
