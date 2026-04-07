@@ -276,6 +276,38 @@ def load_shencecup_labeled(root_dir: str | Path, limit: int | None = None) -> Li
     return docs
 
 
+def load_multi_domain_jsonl(path: Path, limit: int | None = None) -> List[Document]:
+    """Load LLM-annotated multi-domain JSONL data (each line: text, keywords, source, domain)."""
+    docs: List[Document] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            text = obj["text"].strip()
+            keywords = [k.strip() for k in obj.get("keywords", []) if k.strip()]
+            if not text or not keywords:
+                continue
+            docs.append(
+                Document(
+                    doc_id=f"md-{obj.get('line_idx', len(docs))}",
+                    text=text,
+                    keywords=keywords,
+                    language="zh",
+                    meta={
+                        "source": obj.get("source", ""),
+                        "domain": obj.get("domain", ""),
+                        "char_len": len(text),
+                        "keyword_count": len(keywords),
+                    },
+                )
+            )
+            if limit and len(docs) >= limit:
+                break
+    return docs
+
+
 def build_shencecup_eval_sets(root_dir: str | Path, shencecup_limit: int | None = None) -> Dict[str, List[Document]]:
     docs = load_shencecup_labeled(root_dir, limit=shencecup_limit)
     if not docs:
