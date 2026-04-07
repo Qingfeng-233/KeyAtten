@@ -12,6 +12,9 @@ tmp_kaguya_input.md
 checkpoint.pt
 hidden_head_remote_bundle*
 
+# Technical report (draft)
+KeyAtten_Technical_Report.md
+
 # Build artifacts
 dist/
 build/
