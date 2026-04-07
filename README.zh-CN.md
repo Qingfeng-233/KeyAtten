@@ -1,5 +1,7 @@
 # KeyAtten
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19451584.svg)](https://doi.org/10.5281/zenodo.19451584)
+
 [English](README.md) | [中文](README.zh-CN.md)
 
 基于 Transformer Attention 机制的关键词提取框架。零训练、零标注，仅需一次前向推理，支持中英双语。
