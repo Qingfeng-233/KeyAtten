@@ -14,7 +14,7 @@
 - 默认发布方法：`received_attn`，以及有语料库时的 `_idf` 变体
 - 默认部署方向：小模型 + 可解释 Attention + 轻量算子
 
-当前仓库仍把 `gte-small-zh` 作为轻量默认发布模型，但主库已经正式支持 decoder-only 的 causal attention 自适配。对于未显式指定层位的 causal 模型，默认会自动推荐中后层，而不是继续落在最后层。
+当前仓库仍把 `gte-small-zh` 作为轻量默认发布模型，但主库已经正式支持 decoder-only 的 causal attention 自适配。对于未显式指定层位的 causal 模型，默认会自动推荐约 3/4 深度附近的中上层，而不是继续落在最后层。以 `Qwen/Qwen3-Embedding-0.6B` 为例，默认会优先落在约第 21 层附近，而不是第 27 层。
 
 ## 特性
 
@@ -198,7 +198,7 @@ keywords = extract_keywords(
 
 - 自动识别 causal 模型
 - 中文 causal 模型默认使用前缀 `核心关键词、关键实体、主题：`
-- 未显式传 `layer_index` 时，默认推荐中后层，而不是最后层
+- 未显式传 `layer_index` 时，默认推荐约 3/4 深度附近的中上层，而不是最后层
 - 对中文 decoder-only 的当前推荐组合，优先看 `Qwen/Qwen3-Embedding-0.6B + fusion_attn_idf`
 
 最新收口见：
@@ -245,6 +245,32 @@ keywords = ext.extract_keywords(
 - [gte-lightweight-deployment.md](./benchmark/gte-lightweight-deployment.md)
 - [gte_onnx_probe.py](./benchmark/gte_onnx_probe.py)
 
+## Benchmark 统一入口
+
+无需再翻 `benchmark/` 里的零散脚本，统一从专业入口执行：
+
+```bash
+python -m keyatten.benchmark_cli --help
+python -m keyatten.benchmark_cli keywords-eval --root-dir "." --output-dir "outputs_smoke" --datasets csl_test --models thenlper/gte-small-zh --skip-yake --device cpu
+```
+
+可编辑安装后也可直接用：
+
+```bash
+keyatten-benchmark --help
+keyatten-benchmark onnx-probe
+```
+
+主要命令映射：
+
+- `keywords-eval` -> `benchmark/run_keyword_benchmark.py`
+- `hidden-head-train` -> `benchmark/train_hidden_state_head.py`
+- `hidden-head-eval` -> `benchmark/run_hidden_head_benchmark.py`
+- `onnx-probe` -> `benchmark/gte_onnx_probe.py`
+- `llm-eval` -> `benchmark/llm_keyword_benchmark.py`
+
+完整说明见：[benchmark/README.md](./benchmark/README.md)
+
 ## 评测摘要
 
 在 7 个公开数据集上与 TF-IDF、TextRank、KeyBERT 等 14 种方法对比，指标为 F1@10：
@@ -271,7 +297,7 @@ KeyAttenExtractor(
     backend: str = "auto",              # "auto" / "torch" / "onnx"
     onnx_path: str | None = None,       # ONNX attention 文件路径
     user_dict: str | list[str] | dict = None,  # 领域词典路径 / 术语列表 / 术语配置
-    layer_index: int | None = None,     # None = 自动；causal 模型默认中后层，-1 = 显式最后层
+    layer_index: int | None = None,     # None = 自动；causal 模型默认约 3/4 深度附近的中上层，-1 = 显式最后层
     layer_indices: list[int] = None,    # 多层索引列表
     layer_weights: list[float] = None,  # 多层权重列表
     attn_merge: bool = False,           # Attention 引导的中文单字合并
@@ -298,7 +324,7 @@ KeyAttenExtractor(
 - 这时可选传 `pos_tags`；若不传，中文默认按名词 `n`、英文默认按 `eng` 处理
 - `user_dict` 支持三种形式：词典文件路径、术语列表、`{term: tag}` / `{term: (freq, tag)}` 配置
 - `extract_keywords()` / `extract_keywords_batch()` 默认方法现在是 `received_attn`
-- 对 causal 模型，如果 `layer_index` 留空，主库会自动使用推荐的中后层
+- 对 causal 模型，如果 `layer_index` 留空，主库会自动使用约 3/4 深度附近的推荐中上层
 - `is_causal_override` 只覆盖 attention 读取模式，不会改变模型本身结构
 - `dedup_nested_for_topk5=True` 时，仅在 `top_k<=5` 应用子串/超串去重，不影响 `@10`
 - `candidate_scoring="token_span"` 仅适用于原始字符串输入；外部分词输入仍然走原有词级排序路径
