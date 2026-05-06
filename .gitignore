@@ -6,16 +6,53 @@ CLAUDE.md
 AGENTS.md
 tmp_kaguya_input.md
 
-# Large files
-*.tar.gz
-*.safetensors
-checkpoint.pt
-hidden_head_remote_bundle*
+# Models: ignore all except LoRA adapters
+models/gte-small-zh/
+models/gte_small_zh_onnx/
+models/Qwen3-Embedding-0.6B/
+models/qk_qwen0.6B/checkpoint.pt
+models/qk_qwen0.6B/final_eval.json
+models/qk_qwen0.6B/training_log.json
+models/qk_qwen0.6B/train_*.log
+models/qk_qwen0.6B/*.pt
+models/qk_qwen4B/checkpoint.pt
+models/qk_qwen4B/final_eval.json
+models/qk_qwen4B/training_log.json
+models/qk_qwen4B/train_*.log
+models/qk_qwen4B/*.pt
+models/_archive/
+models/bio_ckipbert_extractive_ep13/*.pt
+models/gte-small-zh/
+
+# Train checkpoints (duplicates of models/)
+train/bio_ckpt_ep13_production/*.pt
+
+# Keep LoRA adapters tracked (do NOT ignore):
+#   models/qk_qwen0.6B/best_adapter/
+#   models/qk_qwen0.6B/latest_adapter/
+#   models/qk_qwen4B/best_adapter/
+#   models/qk_qwen4B/latest_adapter/
 
 # Technical report (draft)
 KeyAtten_Technical_Report.md
+
+# Personal test files
+test_effect.md
+
+# Copyrighted news data (not redistributable)
+data/news/
+
+# Large raw data (>100MB, exceeds GitHub limit)
+data/shencecup/raw/all_docs.txt
 
 # Build artifacts
 dist/
 build/
 *.egg-info/
+.ruff_cache/
+#aicoding
+
+.qwen/
+docs
+.factory
+.claude

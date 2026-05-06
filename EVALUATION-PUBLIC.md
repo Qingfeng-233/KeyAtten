@@ -21,7 +21,7 @@ KeyAtten provides 4 pure attention methods (`cls_attn`, `received_attn`, `samran
   - `csl_test`: `received_attn_idf@layer_21 = 0.1630`
   - `shencecup_labeled`: `fusion_attn_idf@layer_21 = 0.2718`
 - Experimental branches such as `excess_attn`, head-weighting, rise score, attention-gated candidates, and true bidirectional monkey-patches are not promoted to the default algorithm.
-- Rollout summary: [benchmark/decoder-only-rollout-summary.md](./benchmark/decoder-only-rollout-summary.md)
+- Rollout details are documented in the project's internal experiment notes under `docs/`
 
 ### Key Findings
 
@@ -244,9 +244,40 @@ Full-dataset evaluation (1000 docs each, QK_sigmoid — best config):
 - **CSL F1@10 = 0.1750**: competitive (#4 overall) but does not surpass TF-IDF (0.1935). This is **not** a model capability issue — it reflects the inherent limitation of **extractive keyword generation**: CSL ground-truth keywords frequently include rephrased, abstracted, or generalized terms that do not appear verbatim in the original text, which no extractive method can recover
 - IDF post-processing degrades QK LoRA scores; the sigmoid-transformed QK signal is already well-calibrated
 
-The best adapter is archived at [`benchmark/qk_lora_adapter/best_adapter/`](./benchmark/qk_lora_adapter/).
+The best adapter is archived at [`models/qk_lora/best_adapter/`](./models/qk_lora/).
 
 > **Note**: This result was obtained with limited compute (6 epochs on a single GPU). With more training epochs and larger-scale hardware, further improvement is expected.
+
+---
+
+## Main Method: BIO Candidates + Candidate-Segment Attention Reranking
+
+### 2026-05-06 Update
+
+The current primary method uses BIO boundary detection for candidate generation, then reranks candidates via fine-tuned Candidate-Segment Attention on `Qwen/Qwen3-Embedding-0.6B`.
+
+**Entrypoint**: `CandidateSegmentAttentionExtractor`
+
+**Training**: 2000 documents, candidate-level soft KL loss, random candidate ordering (anti-position-bias), LoRA adapter on Q/K/V.
+
+Evaluation on news55 (55 clean news articles, fair heldout):
+
+| Rank | Method | F1@5 | F1@10 |
+|:---:|--------|:---:|:---:|
+| 1 | BIO Viterbi | 0.4507 | **0.4994** |
+| 2 | **Candidate-Segment Attention** | — | **0.4665** |
+| 3 | BIO clean | 0.4101 | 0.3916 |
+| 4 | QK LoRA | 0.2617 | 0.2610 |
+| 5 | GTE classifier head | 0.2270 | 0.2607 |
+| 6 | GTE received_attn | 0.1455 | 0.1567 |
+
+- **Candidate-Segment Attention F1@10 = 0.4665**: **+19.1%** over BIO clean (0.3916), the first attention-based method to significantly exceed BIO-only output
+- BIO Viterbi remains highest but has known data contamination risk on ShenCeCup; news55 is a fair heldout set
+- The adapter is archived at [`models/candidate_segment_attn/`](./models/candidate_segment_attn/)
+
+> **Key takeaway**: Fine-tuned attention reranking over BIO candidates achieves meaningful gains beyond what BIO alone provides, validating the "BIO candidates + Attention reranking" architecture as the production main method.
+
+---
 
 ### Attention Gravity
 
@@ -260,8 +291,9 @@ Usage: set `enable_gravity=True` with `candidate_scoring="token_span"` in `KeyAt
 
 | Scenario | Recommended Method | Expected F1@10 | vs Traditional Baseline |
 |----------|-------------------|:---:|:---:|
-| Chinese News | `samrank` | ~0.25 | +67% |
+| **Chinese News (main method)** | **Candidate-Segment Attention** | **~0.47** | **+200%+** |
 | Chinese News (with LoRA) | QK LoRA | ~0.33 | +113% |
+| Chinese News (zero-shot) | `samrank` | ~0.25 | +67% |
 | Chinese Academic | `samrank_idf` | ~0.21 | +9% |
 | English Long Documents | `cls_attn_idf` | ~0.13 | +78%–79% |
 | Tag Clouds / Summaries | `cls_attn` | — | Highest distinctiveness |

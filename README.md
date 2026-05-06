@@ -17,12 +17,49 @@ Evaluated on 7 public datasets against 14 methods: +67% F1@10 over traditional b
 
 The repository still treats `gte-small-zh` as the lightweight default production model, but the main library now ships decoder-only causal attention adaptation. When no layer is specified for a causal model, KeyAtten automatically recommends a middle-upper layer at roughly 3/4 depth instead of falling back to the last layer. For example, `Qwen/Qwen3-Embedding-0.6B` defaults to the middle-upper band around layer 21 rather than layer 27.
 
+## Method Categories
+
+The README now groups the library into three public method categories:
+
+### 1. Main Method: BIO Candidates + Fine-Tuned Attention Reranking
+
+This is the current primary route.
+
+In plain terms:
+
+- replace the default candidate set with BIO candidates
+- then use fine-tuned attention to rank them
+
+Main entrypoints:
+
+- `KeyAttenExtractor(candidate_scoring="bio")`
+- `CandidateSegmentAttentionExtractor`
+
+### 2. Standalone Methods
+
+- Attention-series methods
+- `BIOExtractor`
+- `QKLoRAExtractor`
+
+Attention-series methods include:
+
+- `cls_attn`
+- `received_attn`
+- `samrank`
+- `fusion_attn`
+- their `_idf` variants
+
+### 3. Baselines / Other Methods
+
+- used for comparison, legacy experiments, or external baselines
+
 ## Features
 
 - Extracts keywords directly from pretrained model attention weights — no fine-tuning or labeling required
 - Attention-IDF hybrid strategy for significant gains on long documents and corpus-aware scenarios
 - Word-level semantic weight output (weight value, position index, POS tag)
 - Single-layer or multi-layer attention weighted fusion
+- Candidate-segment attention reranking with BIO-generated phrase candidates
 - Lightweight: 22M–33M parameter models, single forward pass
 
 ## Installation
@@ -139,6 +176,40 @@ keywords = ext.extract_keywords(
 )
 ```
 
+### BIO Candidates Instead of Jieba Candidates
+
+```python
+ext = KeyAttenExtractor(
+    model="Qwen/Qwen3-Embedding-0.6B",
+    language="zh",
+    candidate_scoring="bio",
+    bio_model_path="models/bio_ckipbert_extractive_ep13/bio_model_full.pt",
+)
+
+keywords = ext.extract_keywords(
+    "水木年华被嘲讽已过气，卢庚戌回应称作品会留下来",
+    method="received_attn",
+)
+```
+
+### Candidate-Segment Attention Reranking
+
+```python
+from keyatten import CandidateSegmentAttentionExtractor
+
+ext = CandidateSegmentAttentionExtractor(
+    model="Qwen/Qwen3-Embedding-0.6B",
+    adapter_path="models/candidate_segment_attn/qwen06_v2_2k_len1024_c30/best_adapter",
+    bio_model_path="models/bio_ckipbert_extractive_ep13/bio_model_full.pt",
+    max_candidates=30,
+)
+
+keywords = ext.extract_keywords(
+    "水木年华被嘲讽已过气，卢庚戌回应称作品会留下来",
+    random_seeds=[1, 2, 3],
+)
+```
+
 ### Convenience Function
 
 ```python
@@ -150,7 +221,7 @@ keywords = extract_keywords(
 )
 ```
 
-## Methods
+## Attention-Series Methods
 
 | Method | Description |
 |--------|-------------|
@@ -163,13 +234,17 @@ Each method has a corresponding `_idf` hybrid variant (e.g., `cls_attn_idf`) tha
 
 > The `samrank` formula is referenced from [Kang & Shin (2023, EMNLP)](https://doi.org/10.18653/v1/2023.emnlp-main.630). The other methods (`cls_attn`, `received_attn`, `fusion_attn`) and all `_idf` hybrid strategies are original to this project.
 
-### Choosing a Method
+### Using Attention as a Secondary Method
 
 `received_attn` is now the safest default starting point. When a corpus is available, `_idf` variants should be tried first; in the latest Chinese decoder-only rollup, `received_attn_idf` is the main CSL path and `fusion_attn_idf` is the main ShenCeCup path. `cls_attn` is still useful for high-distinctiveness tag-cloud style outputs, but it is no longer the default keyword-extraction method.
 
 If your main metric is `F1@5`, the library now also exposes an optional nested-phrase de-dup post-ranking step. It only activates when `top_k <= 5`, filters substring/superstring duplicates such as `natural language processing / natural language / language processing`, and stays off by default so the `@10` path is unchanged.
 
 For raw string input, the library now also exposes an optional `candidate_scoring="token_span"` route. Candidate generation still follows the segmenter and POS filter, but ranking aggregates token attention directly over each candidate's character span, bypassing the previous word-level mean-of-means path.
+
+For Chinese raw string input, the library also exposes `candidate_scoring="bio"`. This replaces the default jieba/POS candidate generator with `BIOExtractor` candidates first, then scores those BIO candidates with attention.
+
+For trained Chinese reranking, the library also exposes `CandidateSegmentAttentionExtractor`. This route uses `BIOExtractor` only for candidate generation, then reranks the explicit candidate list with attention over the full `document + candidate segment` input. If you use random candidate order, prefer multi-seed inference such as `random_seeds=[1, 2, 3]` to reduce order sensitivity.
 
 ## Practical Examples
 
@@ -202,9 +277,7 @@ The main library now includes the stable decoder-only gains:
 - automatic middle-upper layer recommendation when `layer_index` is omitted, using a band at roughly 3/4 depth for causal models
 - current recommended Chinese decoder-only combination: `Qwen/Qwen3-Embedding-0.6B + fusion_attn_idf`
 
-Latest rollout summary:
-
-- [decoder-only-rollout-summary.md](./benchmark/decoder-only-rollout-summary.md)
+Latest rollout details are documented in the project's internal experiment notes under `docs/`.
 
 ## Lightweight Deployment
 
@@ -243,8 +316,7 @@ Notes:
 
 See:
 
-- [gte-lightweight-deployment.md](./benchmark/gte-lightweight-deployment.md)
-- [gte_onnx_probe.py](./benchmark/gte_onnx_probe.py)
+- [gte_onnx_probe.py](./benchmark/tools/gte_onnx_probe.py)
 
 ## Benchmark Entry
 
@@ -252,23 +324,22 @@ Use one professional entrypoint instead of browsing scripts under `benchmark/`:
 
 ```bash
 python -m keyatten.benchmark_cli --help
-python -m keyatten.benchmark_cli keywords-eval --root-dir "." --output-dir "outputs_smoke" --datasets csl_test --models thenlper/gte-small-zh --skip-yake --device cpu
+python -m keyatten.benchmark_cli keyword --root-dir "." --output-dir "outputs_smoke" --datasets csl_test --models thenlper/gte-small-zh --skip-yake --device cpu
 ```
 
 After editable install, you can use:
 
 ```bash
 keyatten-benchmark --help
-keyatten-benchmark onnx-probe
+keyatten-benchmark gte-onnx-probe
 ```
 
 Main command mapping:
 
-- `keywords-eval` -> `benchmark/run_keyword_benchmark.py`
-- `hidden-head-train` -> `benchmark/train_hidden_state_head.py`
-- `hidden-head-eval` -> `benchmark/run_hidden_head_benchmark.py`
-- `onnx-probe` -> `benchmark/gte_onnx_probe.py`
-- `llm-eval` -> `benchmark/llm_keyword_benchmark.py`
+- `keyword` -> `benchmark/eval/run_keyword_benchmark.py`
+- `hidden-head` -> `benchmark/eval/run_hidden_head_benchmark.py`
+- `gte-onnx-probe` -> `benchmark/tools/gte_onnx_probe.py`
+- `llm-keyword` -> `benchmark/eval/llm_keyword_benchmark.py`
 
 Full benchmark usage notes: [benchmark/README.md](./benchmark/README.md)
 
@@ -276,13 +347,16 @@ Full benchmark usage notes: [benchmark/README.md](./benchmark/README.md)
 
 Compared against TF-IDF, TextRank, KeyBERT and 14 methods total on 7 public datasets (F1@10):
 
-| Scenario | KeyAtten Best | vs Strongest Traditional | vs Strongest External |
-|----------|:---:|:---:|:---:|
-| Chinese News (ShenCeCup) | **0.2579** | +67% | — |
-| Chinese Academic (CSL) | **0.2106** | +9% | — |
-| English Long-doc (SemEval2010-fulltext) | **0.1344** | — | +78% |
-| English Long-doc (Krapivin2009-fulltext) | **0.1268** | — | +79% |
-| English Short-doc (3 datasets) | 0.1370 | — | On par |
+| Scenario | KeyAtten Best | Method | vs Strongest Traditional | vs Strongest External |
+|----------|:---:|--------|:---:|:---:|
+| Chinese News (news55) | **0.4994** | BIO Viterbi | +224% | — |
+| Chinese News (ShenCeCup 1000) | **0.3292** | QK LoRA | +113% | — |
+| Chinese Academic (CSL) | **0.2106** | `samrank_idf` | +9% | — |
+| English Long-doc (SemEval2010-fulltext) | **0.1344** | `cls_attn_idf` | — | +78% |
+| English Long-doc (Krapivin2009-fulltext) | **0.1268** | `cls_attn_idf` | — | +79% |
+| English Short-doc (3 datasets) | 0.1370 | `fusion_attn` | — | On par |
+
+The **main method** (BIO candidates + fine-tuned Candidate-Segment Attention reranking) achieves F1@10 = 0.4665 on news55, a +13.7% improvement over BIO-only clean baseline (0.3916).
 
 Full evaluation report: [EVALUATION-PUBLIC.md](./EVALUATION-PUBLIC.md)
 
@@ -301,12 +375,10 @@ KeyAttenExtractor(
     layer_index: int | None = None,     # None = auto; causal models default to the middle-upper band at roughly 3/4 depth, -1 = explicit last layer
     layer_indices: list[int] = None,    # multi-layer indices
     layer_weights: list[float] = None,  # multi-layer weights
-    attn_merge: bool = False,           # attention-guided char merging for Chinese
-    merge_threshold: float = 0.3,       # merge threshold (0.0–1.0)
     instruction_prefix: str | None = None,  # optional prefix for causal models
     is_causal_override: bool | None = None,  # None=auto detect; False=force encoder-style readout; True=force decoder-style readout
     dedup_nested_for_topk5: bool = False,    # enable substring de-dup post-processing only when top_k<=5
-    candidate_scoring: str = "word",   # "word" / "token_span"
+    candidate_scoring: str = "word",   # "word" / "token_span" / "bio"
 )
 ```
 
@@ -329,6 +401,7 @@ Notes:
 - `is_causal_override` only overrides the attention readout mode; it does not change the underlying model architecture
 - when `dedup_nested_for_topk5=True`, substring/superstring de-dup is applied only for `top_k<=5`, not for `@10`
 - `candidate_scoring="token_span"` only applies to raw string input; external token input stays on the word-based ranking path
+- `candidate_scoring="bio"` requires `bio_model_path` and only applies to raw string input
 
 ## Citation
 

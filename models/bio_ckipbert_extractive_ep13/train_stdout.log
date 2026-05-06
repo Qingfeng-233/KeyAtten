@@ -1,0 +1,122 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[info] Loaded 1000 ShenCeCup docs for training
+[info] Loaded 8000 THUCNews docs for training
+[info] Loaded 8000 multi-domain docs for training
+[info] ShenCe train: keywords 2941/2984 kept (98.6%), 0 docs dropped
+[info] THUCNews train: keywords 79652/79656 kept (100.0%), 0 docs dropped
+[info] MD train: keywords 68851/71668 kept (96.1%), 2 docs dropped
+[info] Total train docs: 16998 (ShenCe=1000, THUCNews=8000, MD=7998)
+[info] Dev docs: 1000
+Loading weights:   0%|          | 0/197 [00:00<?, ?it/s]Loading weights: 100%|██████████| 197/197 [00:00<00:00, 37371.23it/s]
+[1mBertModel LOAD REPORT[0m from: ckiplab/bert-base-chinese-ner
+Key                          | Status     | 
+-----------------------------+------------+-
+classifier.bias              | UNEXPECTED | 
+classifier.weight            | UNEXPECTED | 
+bert.embeddings.position_ids | UNEXPECTED | 
+pooler.dense.bias            | MISSING    | 
+pooler.dense.weight          | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+[info] Resuming from outputs_bio_extractive/best_full_ckpt.pt
+[info] Resumed at epoch 11, best_f1=0.7998
+[info] Train batches per epoch: 709
+  epoch 11 batch 1/709 loss=24.40 seq_len=512
+  epoch 11 batch 50/709 loss=28.69 seq_len=512
+  epoch 11 batch 100/709 loss=31.40 seq_len=512
+  epoch 11 batch 150/709 loss=23.71 seq_len=512
+  epoch 11 batch 200/709 loss=24.19 seq_len=512
+  epoch 11 batch 250/709 loss=25.52 seq_len=512
+  epoch 11 batch 300/709 loss=21.98 seq_len=512
+  epoch 11 batch 350/709 loss=22.95 seq_len=512
+  epoch 11 batch 400/709 loss=22.48 seq_len=512
+  epoch 11 batch 450/709 loss=21.54 seq_len=512
+  epoch 11 batch 500/709 loss=29.27 seq_len=512
+  epoch 11 batch 550/709 loss=32.84 seq_len=512
+  epoch 11 batch 600/709 loss=32.20 seq_len=512
+  epoch 11 batch 650/709 loss=17.06 seq_len=512
+  epoch 11 batch 700/709 loss=29.57 seq_len=512
+  epoch 11 training done, starting eval...
+{"epoch": 11, "train_loss": 26.197257402417353, "dev_precision": 0.7652467054857494, "dev_recall": 0.837076768354006, "dev_f1": 0.7995517130963817}
+  epoch 12 batch 1/709 loss=22.34 seq_len=512
+  epoch 12 batch 50/709 loss=26.38 seq_len=512
+  epoch 12 batch 100/709 loss=19.90 seq_len=512
+  epoch 12 batch 150/709 loss=29.81 seq_len=512
+  epoch 12 batch 200/709 loss=23.48 seq_len=512
+  epoch 12 batch 250/709 loss=19.98 seq_len=512
+  epoch 12 batch 300/709 loss=21.65 seq_len=512
+  epoch 12 batch 350/709 loss=17.82 seq_len=512
+  epoch 12 batch 400/709 loss=19.30 seq_len=512
+  epoch 12 batch 450/709 loss=23.01 seq_len=512
+  epoch 12 batch 500/709 loss=20.08 seq_len=512
+  epoch 12 batch 550/709 loss=22.03 seq_len=512
+  epoch 12 batch 600/709 loss=24.32 seq_len=512
+  epoch 12 batch 650/709 loss=23.66 seq_len=512
+  epoch 12 batch 700/709 loss=20.54 seq_len=512
+  epoch 12 training done, starting eval...
+{"epoch": 12, "train_loss": 22.529548287223527, "dev_precision": 0.7334851936218679, "dev_recall": 0.8635601743211532, "dev_f1": 0.7932255581216321}
+  epoch 13 batch 1/709 loss=18.76 seq_len=512
+  epoch 13 batch 50/709 loss=21.02 seq_len=512
+  epoch 13 batch 100/709 loss=22.77 seq_len=512
+  epoch 13 batch 150/709 loss=19.46 seq_len=512
+  epoch 13 batch 200/709 loss=18.44 seq_len=512
+  epoch 13 batch 250/709 loss=20.19 seq_len=512
+  epoch 13 batch 300/709 loss=21.43 seq_len=512
+  epoch 13 batch 350/709 loss=20.53 seq_len=512
+  epoch 13 batch 400/709 loss=18.23 seq_len=512
+  epoch 13 batch 450/709 loss=22.60 seq_len=512
+  epoch 13 batch 500/709 loss=15.58 seq_len=512
+  epoch 13 batch 550/709 loss=22.99 seq_len=512
+  epoch 13 batch 600/709 loss=17.99 seq_len=512
+  epoch 13 batch 650/709 loss=19.51 seq_len=512
+  epoch 13 batch 700/709 loss=22.46 seq_len=512
+  epoch 13 training done, starting eval...
+{"epoch": 13, "train_loss": 19.51364896663994, "dev_precision": 0.8173198482932996, "dev_recall": 0.8669125041904123, "dev_f1": 0.8413860419716934}
+  Saved best checkpoint (F1=0.8414)
+  epoch 14 batch 1/709 loss=16.43 seq_len=512
+  epoch 14 batch 50/709 loss=14.75 seq_len=512
+  epoch 14 batch 100/709 loss=15.18 seq_len=512
+  epoch 14 batch 150/709 loss=20.66 seq_len=512
+  epoch 14 batch 200/709 loss=17.78 seq_len=512
+  epoch 14 batch 250/709 loss=17.26 seq_len=512
+  epoch 14 batch 300/709 loss=15.54 seq_len=512
+  epoch 14 batch 350/709 loss=17.05 seq_len=512
+  epoch 14 batch 400/709 loss=18.54 seq_len=512
+  epoch 14 batch 450/709 loss=18.51 seq_len=512
+  epoch 14 batch 500/709 loss=15.20 seq_len=512
+  epoch 14 batch 550/709 loss=19.13 seq_len=512
+  epoch 14 batch 600/709 loss=18.40 seq_len=512
+  epoch 14 batch 650/709 loss=16.93 seq_len=512
+  epoch 14 batch 700/709 loss=16.56 seq_len=512
+  epoch 14 training done, starting eval...
+{"epoch": 14, "train_loss": 16.903340316793983, "dev_precision": 0.7273467173087358, "dev_recall": 0.8987596379483741, "dev_f1": 0.8040185934922777}
+  epoch 15 batch 1/709 loss=15.36 seq_len=512
+  epoch 15 batch 50/709 loss=14.42 seq_len=512
+  epoch 15 batch 100/709 loss=12.44 seq_len=512
+  epoch 15 batch 150/709 loss=14.73 seq_len=512
+  epoch 15 batch 200/709 loss=11.98 seq_len=512
+  epoch 15 batch 250/709 loss=11.76 seq_len=512
+  epoch 15 batch 300/709 loss=13.70 seq_len=512
+  epoch 15 batch 350/709 loss=16.04 seq_len=512
+  epoch 15 batch 400/709 loss=17.65 seq_len=512
+  epoch 15 batch 450/709 loss=16.05 seq_len=512
+  epoch 15 batch 500/709 loss=13.92 seq_len=512
+  epoch 15 batch 550/709 loss=15.36 seq_len=512
+  epoch 15 batch 600/709 loss=13.71 seq_len=512
+  epoch 15 batch 650/709 loss=10.85 seq_len=512
+  epoch 15 batch 700/709 loss=12.87 seq_len=512
+  epoch 15 training done, starting eval...
+{"epoch": 15, "train_loss": 14.746315822951043, "dev_precision": 0.786520190023753, "dev_recall": 0.8880321823667449, "dev_f1": 0.8341993386868208}
+  epoch 16 batch 1/709 loss=14.05 seq_len=512
+  epoch 16 batch 50/709 loss=12.19 seq_len=512
+  epoch 16 batch 100/709 loss=11.71 seq_len=512
+  epoch 16 batch 150/709 loss=13.00 seq_len=512
+  epoch 16 batch 200/709 loss=12.90 seq_len=512
+  epoch 16 batch 250/709 loss=16.24 seq_len=512
+  epoch 16 batch 300/709 loss=10.62 seq_len=512
+  epoch 16 batch 350/709 loss=11.98 seq_len=512
+  epoch 16 batch 400/709 loss=13.15 seq_len=512
+  epoch 16 batch 450/709 loss=14.05 seq_len=512
+  epoch 16 batch 500/709 loss=14.97 seq_len=512

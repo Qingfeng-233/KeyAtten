@@ -280,6 +280,7 @@ def rank_candidates_from_scores(
     candidates: Sequence[Candidate],
     candidate_scores: Sequence[float],
     top_k: int = 30,
+    dedup_nested: bool = False,
 ) -> List[str]:
     if not candidates:
         return []
@@ -290,8 +291,31 @@ def rank_candidates_from_scores(
         return []
 
     sorted_indices = finite_indices[np.argsort(scores_array[finite_indices])[::-1]]
-    limit = min(top_k, sorted_indices.size)
-    return [candidates[int(index)].text for index in sorted_indices[:limit]]
+
+    if not dedup_nested:
+        limit = min(top_k, sorted_indices.size)
+        return [candidates[int(index)].text for index in sorted_indices[:limit]]
+
+    # With nested deduplication
+    ranked: List[str] = []
+    selected_normalized: List[str] = []
+
+    for index in sorted_indices:
+        candidate = candidates[int(index)]
+        normalized = normalize_phrase(candidate.text)
+        if not normalized:
+            continue
+        is_nested = any(
+            normalized in selected_text or selected_text in normalized
+            for selected_text in selected_normalized
+        )
+        if is_nested:
+            continue
+        ranked.append(candidate.text)
+        selected_normalized.append(normalized)
+        if len(ranked) >= top_k:
+            break
+    return ranked
 
 
 def candidate_rank_from_word_scores(
@@ -1073,6 +1097,70 @@ def _aggregate_subwords_to_words_torch(
     return (sums / counts.clamp_min(1.0)).cpu().numpy()
 
 
+def _resolve_transformer_layers(model: torch.nn.Module) -> list[torch.nn.Module] | None:
+    """Resolve transformer layers from various model architectures."""
+    direct_model = getattr(model, "model", None)
+    if direct_model is not None and hasattr(direct_model, "layers"):
+        return list(direct_model.layers)
+
+    encoder = getattr(model, "encoder", None)
+    if encoder is not None and hasattr(encoder, "layer"):
+        return list(encoder.layer)
+
+    for backbone_name in ("bert", "roberta", "deberta", "deberta_v2", "mpnet", "electra", "xlm_roberta"):
+        backbone = getattr(model, backbone_name, None)
+        if backbone is None:
+            continue
+        encoder = getattr(backbone, "encoder", None)
+        if encoder is not None and hasattr(encoder, "layer"):
+            return list(encoder.layer)
+
+    transformer = getattr(model, "transformer", None)
+    if transformer is not None and hasattr(transformer, "layer"):
+        return list(transformer.layer)
+
+    return None
+
+
+def _resolve_attention_modules(model: torch.nn.Module) -> list[torch.nn.Module] | None:
+    """Resolve attention modules from transformer layers."""
+    layers = _resolve_transformer_layers(model)
+    if not layers:
+        return None
+
+    modules: list[torch.nn.Module] = []
+    for layer in layers:
+        attention_module = getattr(layer, "self_attn", None)
+        if attention_module is None:
+            attention = getattr(layer, "attention", None)
+            attention_module = getattr(attention, "self", None) if attention is not None else None
+        if attention_module is None:
+            attention_module = getattr(layer, "attn", None)
+        if attention_module is None:
+            return None
+        modules.append(attention_module)
+    return modules
+
+
+def _extract_attention_weights_from_module_output(outputs) -> torch.Tensor | None:
+    """Extract attention weights from module forward output."""
+    if not isinstance(outputs, (tuple, list)) or len(outputs) < 2:
+        return None
+    candidate = outputs[1]
+    if torch.is_tensor(candidate):
+        return candidate
+    return None
+
+
+def _replace_attention_weights_with_none(outputs):
+    """Replace attention weights with None to save memory during streaming."""
+    if not isinstance(outputs, tuple):
+        return outputs
+    if len(outputs) < 2 or not torch.is_tensor(outputs[1]):
+        return outputs
+    return (outputs[0], None, *outputs[2:])
+
+
 def _resolve_layer_index(layer_index: int, layer_count: int) -> int:
     resolved = layer_index if layer_index >= 0 else layer_count + layer_index
     if resolved < 0 or resolved >= layer_count:
@@ -1608,6 +1696,7 @@ def batched_attention_word_scores(
     null_debias_samples: int = 0,
     null_debias_gamma: float = 1.0,
     null_debias_seed: int = 13,
+    stream_attention_scores: bool = True,
 ) -> List[Dict[int, Dict[str, np.ndarray]]]:
     if not batch_words:
         return []
@@ -1623,6 +1712,11 @@ def batched_attention_word_scores(
     null_debias_enabled = int(null_debias_samples) > 0
     null_rng = np.random.default_rng(null_debias_seed)
     noise_token_ids = np.asarray(model_bundle.get("noise_token_ids", np.zeros(0, dtype=np.int64)), dtype=np.int64)
+    attention_modules = (
+        _resolve_attention_modules(model)
+        if stream_attention_scores and not null_debias_enabled
+        else None
+    )
 
     results: List[Dict[int, Dict[str, np.ndarray]]] = []
     total_batches = max(math.ceil(len(batch_words) / batch_size), 1)
@@ -1652,6 +1746,39 @@ def batched_attention_word_scores(
             _word_ids_to_tensor(word_ids_per_item[index][: valid_token_counts[index]], device)
             for index in range(len(word_batch))
         ]
+
+        if attention_modules is not None:
+            prefix_word_count = len(prefix_words)
+            per_item_scores_list = _collect_streamed_attention_scores(
+                model,
+                attention_modules,
+                encoded,
+                layer_indices=layer_indices,
+                content_word_batch=content_word_batch,
+                word_batch=word_batch,
+                word_ids_per_item=word_ids_per_item,
+                valid_token_counts=valid_token_counts,
+                word_id_tensors=word_id_tensors,
+                combined_pos_tag_batch=combined_pos_tag_batch,
+                language=language,
+                prefix_word_count=prefix_word_count,
+                is_causal=is_causal,
+                true_bidirectional_attention=true_bidirectional_attention,
+                resolved_head_strategies=resolved_head_strategies,
+                cls_head_top_k=cls_head_top_k,
+                cls_head_temperature=cls_head_temperature,
+                somp_alpha=somp_alpha,
+                somp_beta=somp_beta,
+                somp_local_window=somp_local_window,
+            )
+            results.extend(per_item_scores_list)
+            if progress_label and (
+                batch_index == 1
+                or batch_index == total_batches
+                or (log_every_batches > 0 and batch_index % log_every_batches == 0)
+            ):
+                print(f"[{progress_label}] batch {batch_index}/{total_batches}")
+            continue
 
         outputs = _run_attention_forward(
             model,
@@ -1784,6 +1911,134 @@ def batched_attention_word_scores(
         ):
             print(f"[{progress_label}] batch {batch_index}/{total_batches}")
     return results
+
+
+def _collect_streamed_attention_scores(
+    model: torch.nn.Module,
+    attention_modules: Sequence[torch.nn.Module],
+    encoded_inputs: dict[str, torch.Tensor],
+    *,
+    layer_indices: Sequence[int],
+    content_word_batch: Sequence[Sequence[str]],
+    word_batch: Sequence[Sequence[str]],
+    word_ids_per_item: Sequence[Sequence[int | None]],
+    valid_token_counts: Sequence[int],
+    word_id_tensors: Sequence[torch.Tensor],
+    combined_pos_tag_batch: Sequence[Sequence[str]] | None,
+    language: str,
+    prefix_word_count: int,
+    is_causal: bool,
+    true_bidirectional_attention: bool,
+    resolved_head_strategies: Sequence[str],
+    cls_head_top_k: int,
+    cls_head_temperature: float,
+    somp_alpha: float,
+    somp_beta: float,
+    somp_local_window: int,
+) -> List[Dict[int, Dict[str, np.ndarray]]]:
+    """Collect attention scores using streaming (hook-based) method to save memory."""
+    layer_count = len(attention_modules)
+    resolved_indices = {layer_index: _resolve_layer_index(layer_index, layer_count) for layer_index in layer_indices}
+    requested_by_resolved = {resolved_index: layer_index for layer_index, resolved_index in resolved_indices.items()}
+    per_item_scores_list: List[Dict[int, Dict[str, np.ndarray]]] = [dict() for _ in word_batch]
+    original_forwards: list[tuple[torch.nn.Module, object]] = []
+
+    def make_patched_forward(
+        resolved_layer_index: int,
+        original_forward,
+    ):
+        def patched_forward(self, *args, **kwargs):
+            outputs = original_forward(*args, **kwargs)
+            attn_weights = _extract_attention_weights_from_module_output(outputs)
+            if attn_weights is None:
+                return outputs
+
+            if resolved_layer_index in requested_by_resolved:
+                requested_layer_index = requested_by_resolved[resolved_layer_index]
+                layer_outputs = attn_weights.detach()
+                layer_attention = layer_outputs.mean(dim=1)
+                for item_index, words in enumerate(word_batch):
+                    valid_token_count = valid_token_counts[item_index]
+                    attention_map = layer_attention[item_index, :valid_token_count, :valid_token_count]
+                    content_mask = None
+                    if is_causal and combined_pos_tag_batch is not None:
+                        content_mask_np = _build_content_mask(
+                            word_ids_per_item[item_index][:valid_token_count],
+                            words,
+                            combined_pos_tag_batch[item_index],
+                            language,
+                        )
+                        content_mask = torch.as_tensor(content_mask_np, dtype=torch.bool, device=attention_map.device)
+                    combined_scores = _scores_from_attention_map_torch(
+                        word_id_tensors[item_index],
+                        attention_map,
+                        len(words),
+                        is_causal=is_causal,
+                        content_mask=content_mask,
+                    )
+                    if resolved_head_strategies:
+                        head_attention = layer_outputs[item_index, :, :valid_token_count, :valid_token_count]
+                        effective_content_mask = content_mask if content_mask is not None else (word_id_tensors[item_index] >= 0)
+                        combined_scores.update(
+                            _compute_cls_head_selection_scores_torch(
+                                word_id_tensors[item_index],
+                                head_attention,
+                                len(words),
+                                is_causal=is_causal,
+                                content_mask=effective_content_mask,
+                                strategies=resolved_head_strategies,
+                                top_k=cls_head_top_k,
+                                temperature=cls_head_temperature,
+                                somp_alpha=somp_alpha,
+                                somp_beta=somp_beta,
+                                somp_local_window=somp_local_window,
+                            )
+                        )
+                        combined_scores.update(
+                            _compute_received_head_selection_scores_torch(
+                                word_id_tensors[item_index],
+                                head_attention,
+                                len(words),
+                                is_causal=is_causal,
+                                content_mask=effective_content_mask,
+                                strategies=resolved_head_strategies,
+                                top_k=cls_head_top_k,
+                                temperature=cls_head_temperature,
+                                somp_alpha=somp_alpha,
+                                somp_beta=somp_beta,
+                                somp_local_window=somp_local_window,
+                            )
+                        )
+                    content_word_count = len(content_word_batch[item_index])
+                    per_item_scores_list[item_index][requested_layer_index] = {
+                        method_name: method_scores[prefix_word_count : prefix_word_count + content_word_count]
+                        for method_name, method_scores in combined_scores.items()
+                    }
+                del layer_attention
+                del layer_outputs
+
+            return _replace_attention_weights_with_none(outputs)
+
+        return patched_forward
+
+    for resolved_layer_index, module in enumerate(attention_modules):
+        original_forward = module.forward
+        original_forwards.append((module, original_forward))
+        module.forward = MethodType(make_patched_forward(resolved_layer_index, original_forward), module)
+
+    try:
+        outputs = _run_attention_forward(
+            model,
+            encoded_inputs,
+            true_bidirectional_attention=true_bidirectional_attention,
+        )
+        # Access outputs to trigger hooks
+        _ = outputs.last_hidden_state
+    finally:
+        for module, original_forward in original_forwards:
+            module.forward = original_forward
+
+    return per_item_scores_list
 
 
 def batched_hidden_word_scores(

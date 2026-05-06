@@ -16,12 +16,49 @@
 
 当前仓库仍把 `gte-small-zh` 作为轻量默认发布模型，但主库已经正式支持 decoder-only 的 causal attention 自适配。对于未显式指定层位的 causal 模型，默认会自动推荐约 3/4 深度附近的中上层，而不是继续落在最后层。以 `Qwen/Qwen3-Embedding-0.6B` 为例，默认会优先落在约第 21 层附近，而不是第 27 层。
 
+## 方法分类
+
+当前 README 只按 3 类方法理解主库：
+
+### 1. 主方法：BIO 候选 + Attention 微调排序
+
+这是当前主推路线。
+
+含义很简单：
+
+- 先把默认候选换成 BIO 候选
+- 再对 attention 做微调，用它来排序
+
+主入口：
+
+- `KeyAttenExtractor(candidate_scoring="bio")`
+- `CandidateSegmentAttentionExtractor`
+
+### 2. 单方法
+
+- Attention 系列方法
+- `BIOExtractor`
+- `QKLoRAExtractor`
+
+其中 Attention 系列方法包括：
+
+- `cls_attn`
+- `received_attn`
+- `samrank`
+- `fusion_attn`
+- 对应 `_idf` 变体
+
+### 3. Baseline / 其他方法
+
+- 用于对照、历史实验或外部比较
+
 ## 特性
 
 - 直接利用预训练模型的注意力权重提取关键词，无需额外训练或标注
 - 提供 Attention-IDF 混合策略，在长文和有语料库的场景下效果显著
 - 支持词级语义权重输出（含权重值、位置索引、词性标注）
 - 支持单层或多层 Attention 加权融合
+- 支持基于 BIO 候选的 Candidate-Segment Attention 重排
 - 仅需 22M–33M 参数的小模型，单次前向推理完成
 
 ## 安装
@@ -138,6 +175,40 @@ keywords = ext.extract_keywords(
 )
 ```
 
+### 用 BIO 候选替换结巴候选
+
+```python
+ext = KeyAttenExtractor(
+    model="Qwen/Qwen3-Embedding-0.6B",
+    language="zh",
+    candidate_scoring="bio",
+    bio_model_path="models/bio_ckipbert_extractive_ep13/bio_model_full.pt",
+)
+
+keywords = ext.extract_keywords(
+    "水木年华被嘲讽已过气，卢庚戌回应称作品会留下来",
+    method="received_attn",
+)
+```
+
+### Candidate-Segment Attention 重排
+
+```python
+from keyatten import CandidateSegmentAttentionExtractor
+
+ext = CandidateSegmentAttentionExtractor(
+    model="Qwen/Qwen3-Embedding-0.6B",
+    adapter_path="models/candidate_segment_attn/qwen06_v2_2k_len1024_c30/best_adapter",
+    bio_model_path="models/bio_ckipbert_extractive_ep13/bio_model_full.pt",
+    max_candidates=30,
+)
+
+keywords = ext.extract_keywords(
+    "水木年华被嘲讽已过气，卢庚戌回应称作品会留下来",
+    random_seeds=[1, 2, 3],
+)
+```
+
 ### 便捷函数
 
 ```python
@@ -149,7 +220,7 @@ keywords = extract_keywords(
 )
 ```
 
-## 提取方法
+## Attention 系列方法
 
 | 方法 | 说明 |
 |------|------|
@@ -162,13 +233,17 @@ keywords = extract_keywords(
 
 > `samrank` 的排序公式引用自 [Kang & Shin (2023, EMNLP)](https://doi.org/10.18653/v1/2023.emnlp-main.630)，其余方法及所有 `_idf` 混合策略为本项目原创。
 
-### 如何选择方法
+### 如何使用 Attention 副方法
 
 当前更稳的默认起点是 `received_attn`。如果你有语料库，优先试 `_idf` 变体；在本轮中文 decoder-only 收口里，`csl_test` 主看 `received_attn_idf`，`shencecup_labeled` 主看 `fusion_attn_idf`。`cls_attn` 仍然适合做“一眼看主题”的高辨识度展示，但不再是主库关键词接口的默认方法。
 
 如果你的主指标是 `F1@5`，现在还可以把“嵌套短语去重”作为可选后处理打开。这个开关只会在 `top_k <= 5` 时生效，用来过滤“自然语言处理 / 自然语言 / 语言处理”这类文本包含关系，默认关闭，不影响现有 `@10` 路线。
 
 对于原始字符串输入，主库现在还支持可选的 `candidate_scoring="token_span"` 路线。候选生成仍然走分词与词性过滤，但候选排序会直接聚合候选字符跨度内的 token attention，绕过原来的词级 mean-of-means 打分。
+
+对于中文原始字符串输入，主库也支持 `candidate_scoring="bio"` 路线。这条方法会先用 `BIOExtractor` 替换默认的结巴/POS 候选生成，再用 attention 对 BIO 候选打分。
+
+对于需要训练后重排的中文路线，主库现在还提供 `CandidateSegmentAttentionExtractor`。这条路线里 `BIOExtractor` 只负责产出候选，排序完全由 `文章全文 + 候选段` 上的 attention 完成。如果使用随机候选顺序，建议推理时使用 `random_seeds=[1, 2, 3]` 这类多 seed 集成，以降低顺序敏感性。
 
 ## 实战示例
 
@@ -201,9 +276,7 @@ keywords = extract_keywords(
 - 未显式传 `layer_index` 时，默认推荐约 3/4 深度附近的中上层，而不是最后层
 - 对中文 decoder-only 的当前推荐组合，优先看 `Qwen/Qwen3-Embedding-0.6B + fusion_attn_idf`
 
-最新收口见：
-
-- [decoder-only-rollout-summary.md](./benchmark/decoder-only-rollout-summary.md)
+最新收口详见项目内部实验文档 `docs/`。
 
 ## 轻量部署
 
@@ -242,8 +315,7 @@ keywords = ext.extract_keywords(
 
 主仓库说明见：
 
-- [gte-lightweight-deployment.md](./benchmark/gte-lightweight-deployment.md)
-- [gte_onnx_probe.py](./benchmark/gte_onnx_probe.py)
+- [gte_onnx_probe.py](./benchmark/tools/gte_onnx_probe.py)
 
 ## Benchmark 统一入口
 
@@ -251,23 +323,22 @@ keywords = ext.extract_keywords(
 
 ```bash
 python -m keyatten.benchmark_cli --help
-python -m keyatten.benchmark_cli keywords-eval --root-dir "." --output-dir "outputs_smoke" --datasets csl_test --models thenlper/gte-small-zh --skip-yake --device cpu
+python -m keyatten.benchmark_cli keyword --root-dir "." --output-dir "outputs_smoke" --datasets csl_test --models thenlper/gte-small-zh --skip-yake --device cpu
 ```
 
 可编辑安装后也可直接用：
 
 ```bash
 keyatten-benchmark --help
-keyatten-benchmark onnx-probe
+keyatten-benchmark gte-onnx-probe
 ```
 
 主要命令映射：
 
-- `keywords-eval` -> `benchmark/run_keyword_benchmark.py`
-- `hidden-head-train` -> `benchmark/train_hidden_state_head.py`
-- `hidden-head-eval` -> `benchmark/run_hidden_head_benchmark.py`
-- `onnx-probe` -> `benchmark/gte_onnx_probe.py`
-- `llm-eval` -> `benchmark/llm_keyword_benchmark.py`
+- `keyword` -> `benchmark/eval/run_keyword_benchmark.py`
+- `hidden-head` -> `benchmark/eval/run_hidden_head_benchmark.py`
+- `gte-onnx-probe` -> `benchmark/tools/gte_onnx_probe.py`
+- `llm-keyword` -> `benchmark/eval/llm_keyword_benchmark.py`
 
 完整说明见：[benchmark/README.md](./benchmark/README.md)
 
@@ -275,13 +346,16 @@ keyatten-benchmark onnx-probe
 
 在 7 个公开数据集上与 TF-IDF、TextRank、KeyBERT 等 14 种方法对比，指标为 F1@10：
 
-| 场景 | KeyAtten 最优 | vs 最强传统基线 | vs 最强外部方法 |
-|------|:---:|:---:|:---:|
-| 中文新闻（ShenCeCup） | **0.2579** | +67% | — |
-| 中文学术摘要（CSL） | **0.2106** | +9% | — |
-| 英文长文（SemEval2010-fulltext） | **0.1344** | — | +78% |
-| 英文长文（Krapivin2009-fulltext） | **0.1268** | — | +79% |
-| 英文短文（3 个数据集） | 0.1370 | — | 持平 |
+| 场景 | KeyAtten 最优 | 方法 | vs 最强传统基线 | vs 最强外部方法 |
+|------|:---:|--------|:---:|:---:|
+| 中文新闻（news55） | **0.4994** | BIO Viterbi | +224% | — |
+| 中文新闻（ShenCeCup 1000） | **0.3292** | QK LoRA | +113% | — |
+| 中文学术摘要（CSL） | **0.2106** | `samrank_idf` | +9% | — |
+| 英文长文（SemEval2010-fulltext） | **0.1344** | `cls_attn_idf` | — | +78% |
+| 英文长文（Krapivin2009-fulltext） | **0.1268** | `cls_attn_idf` | — | +79% |
+| 英文短文（3 个数据集） | 0.1370 | `fusion_attn` | — | 持平 |
+
+**主方法**（BIO 候选 + Candidate-Segment Attention 微调排序）在 news55 上 F1@10 = 0.4665，较 BIO clean 基线（0.3916）提升 +13.7%。
 
 完整评测报告见 [EVALUATION-PUBLIC.md](./EVALUATION-PUBLIC.md)。
 
@@ -300,12 +374,10 @@ KeyAttenExtractor(
     layer_index: int | None = None,     # None = 自动；causal 模型默认约 3/4 深度附近的中上层，-1 = 显式最后层
     layer_indices: list[int] = None,    # 多层索引列表
     layer_weights: list[float] = None,  # 多层权重列表
-    attn_merge: bool = False,           # Attention 引导的中文单字合并
-    merge_threshold: float = 0.3,       # 合并阈值（0.0–1.0）
     instruction_prefix: str | None = None,  # causal 模型可选前缀
     is_causal_override: bool | None = None,  # None=自动检测；False=强制按 encoder 读；True=强制按 decoder 读
     dedup_nested_for_topk5: bool = False,    # 仅在 top_k<=5 时启用子串去重后处理
-    candidate_scoring: str = "word",         # "word" / "token_span"
+    candidate_scoring: str = "word",         # "word" / "token_span" / "bio"
 )
 ```
 
@@ -328,6 +400,7 @@ KeyAttenExtractor(
 - `is_causal_override` 只覆盖 attention 读取模式，不会改变模型本身结构
 - `dedup_nested_for_topk5=True` 时，仅在 `top_k<=5` 应用子串/超串去重，不影响 `@10`
 - `candidate_scoring="token_span"` 仅适用于原始字符串输入；外部分词输入仍然走原有词级排序路径
+- `candidate_scoring="bio"` 需要配套传入 `bio_model_path`，且仅适用于原始字符串输入
 
 ## 引用
 
