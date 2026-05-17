@@ -351,7 +351,8 @@ Compared against TF-IDF, TextRank, KeyBERT and 14 methods total on 7 public data
 |----------|:---:|--------|:---:|:---:|
 | Chinese News (news55) | **0.4994** | BIO Viterbi | +224% | — |
 | Chinese News (ShenCeCup 1000) | **0.3292** | QK LoRA | +113% | — |
-| Chinese Academic (CSL) | **0.2106** | `samrank_idf` | +9% | — |
+| Chinese Academic (paper_test_800) | **0.2752** | CSA (high_recall) | — | — |
+| Chinese Academic (CSL, zero-shot) | **0.2106** | `samrank_idf` | +9% | — |
 | English Long-doc (SemEval2010-fulltext) | **0.1344** | `cls_attn_idf` | — | +78% |
 | English Long-doc (Krapivin2009-fulltext) | **0.1268** | `cls_attn_idf` | — | +79% |
 | English Short-doc (3 datasets) | 0.1370 | `fusion_attn` | — | On par |
