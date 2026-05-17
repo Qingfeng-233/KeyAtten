@@ -53,15 +53,17 @@ KeyAtten provides 4 pure attention methods (`cls_attn`, `received_attn`, `samran
 
 ### Datasets
 
-| Dataset | Language | Scenario |
-|---------|----------|----------|
-| CSL | Chinese | Academic abstracts |
-| ShenCeCup | Chinese | News |
-| SemEval2010 | English | Academic short documents |
-| PubMed | English | Academic short documents |
-| LIS2000 | English | Academic short documents |
-| SemEval2010-fulltext | English | Academic long documents (243 full texts) |
-| Krapivin2009-fulltext | English | Academic long documents |
+| Dataset | Language | Scenario | Role |
+|---------|----------|----------|------|
+| **paper_test_800** | Chinese | Academic abstracts (800 docs) | **Primary evaluation set** |
+| CSL | Chinese | Academic abstracts | Secondary (zero-shot methods only) |
+| ShenCeCup | Chinese | News | Secondary (BIO leakage risk) |
+| news55 | Chinese | News (55 docs) | Fair heldout for CSA |
+| SemEval2010 | English | Academic short documents | |
+| PubMed | English | Academic short documents | |
+| LIS2000 | English | Academic short documents | |
+| SemEval2010-fulltext | English | Academic long documents (243 full texts) | |
+| Krapivin2009-fulltext | English | Academic long documents | |
 
 ---
 
@@ -277,6 +279,25 @@ Evaluation on news55 (55 clean news articles, fair heldout):
 
 > **Key takeaway**: Fine-tuned attention reranking over BIO candidates achieves meaningful gains beyond what BIO alone provides, validating the "BIO candidates + Attention reranking" architecture as the production main method.
 
+### 2026-05-10 Update: paper_test_800 (Academic Abstracts)
+
+Evaluation on 800 academic abstracts with author-annotated extractive keywords. 92.7% of gold keywords appear verbatim in the text.
+
+| Config | BIO Profile | max_candidates | F1@5 | F1@10 | R@10 |
+|--------|-------------|:-:|:---:|:---:|:---:|
+| BIO clean (no rerank) | clean | — | 0.2937 | 0.2355 | 0.4838 |
+| CSA baseline | clean | 30 | 0.2892 | 0.2571 | 0.5280 |
+| CSA | clean | 50 | 0.2787 | 0.2650 | 0.5421 |
+| CSA | balanced | 50 | 0.2934 | 0.2497 | 0.5126 |
+| **CSA (best F1@5)** | **high_recall** | **30** | **0.3073** | 0.2651 | 0.5446 |
+| **CSA (best R@10)** | **high_recall** | **50** | 0.3031 | **0.2752** | **0.5652** |
+
+Key findings:
+- **`high_recall` profile + mc=30 yields +6.3% F1@5** over the default `clean` mc=30 configuration
+- Increasing max_candidates improves R@10 but may reduce F1@5 due to harder ranking
+- BIO candidate pool oracle recall: `clean` mc=30 covers 60.2% exact / 87.9% total; `clean` mc=50 covers 70.8% exact / 93.1% total
+- 30% of gold "partial matches" are due to granularity preference (BIO outputs shorter spans), not fragmentation
+
 ---
 
 ### Attention Gravity
@@ -292,9 +313,10 @@ Usage: set `enable_gravity=True` with `candidate_scoring="token_span"` in `KeyAt
 | Scenario | Recommended Method | Expected F1@10 | vs Traditional Baseline |
 |----------|-------------------|:---:|:---:|
 | **Chinese News (main method)** | **Candidate-Segment Attention** | **~0.47** | **+200%+** |
+| **Chinese Academic (main method)** | **CSA (high_recall, mc=30)** | **~0.27** | — |
 | Chinese News (with LoRA) | QK LoRA | ~0.33 | +113% |
 | Chinese News (zero-shot) | `samrank` | ~0.25 | +67% |
-| Chinese Academic | `samrank_idf` | ~0.21 | +9% |
+| Chinese Academic (zero-shot) | `samrank_idf` | ~0.21 | +9% |
 | English Long Documents | `cls_attn_idf` | ~0.13 | +78%–79% |
 | Tag Clouds / Summaries | `cls_attn` | — | Highest distinctiveness |
 | Decoder-only | `received_attn` | ~0.16–0.26 | Varies by scenario |

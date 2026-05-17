@@ -85,6 +85,8 @@ def build_csl_eval_sets(
 ) -> Dict[str, List[Document]]:
     root = Path(root_dir)
     kg_dir = root / "external" / "CSL" / "benchmark" / "kg"
+    if not kg_dir.exists():
+        return {}
     train_docs = load_csl_split(kg_dir / "train.tsv", "train", limit=train_limit)
     dev_docs = load_csl_split(kg_dir / "dev.tsv", "dev", limit=dev_limit)
     test_docs = load_csl_split(kg_dir / "test.tsv", "test", limit=test_limit)
@@ -190,6 +192,8 @@ def load_docsutf8_key_dataset(
 def build_english_eval_sets(root_dir: str | Path, english_limit: int | None = None) -> Dict[str, List[Document]]:
     root = Path(root_dir)
     english_root = root / "external" / "Keyphrase_Extraction" / "Dataset"
+    if not english_root.exists():
+        return {}
     datasets = {
         "semeval2010_test": load_english_jsonl_split(
             english_root / "SemEval-2010" / "test.json",
@@ -308,6 +312,45 @@ def load_multi_domain_jsonl(path: Path, limit: int | None = None) -> List[Docume
     return docs
 
 
+def load_paper_test(root_dir: str | Path, limit: int | None = None) -> List[Document]:
+    """Load paper_test_800.jsonl – academic abstracts with extractive author keywords."""
+    path = Path(root_dir) / "data" / "paper_test_800.jsonl"
+    if not path.exists():
+        return []
+    docs: List[Document] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for i, line in enumerate(handle):
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            text = obj["text"].strip()
+            keywords = [k.strip() for k in obj.get("keywords", []) if k.strip()]
+            if not text or not keywords:
+                continue
+            docs.append(Document(
+                doc_id=f"paper-{i}",
+                text=text,
+                keywords=keywords,
+                language="zh",
+                meta={
+                    "title": obj.get("title", ""),
+                    "char_len": len(text),
+                    "keyword_count": len(keywords),
+                },
+            ))
+            if limit and len(docs) >= limit:
+                break
+    return docs
+
+
+def build_paper_eval_sets(root_dir: str | Path, paper_limit: int | None = None) -> Dict[str, List[Document]]:
+    docs = load_paper_test(root_dir, limit=paper_limit)
+    if not docs:
+        return {}
+    return {"paper_test_800": docs}
+
+
 def build_shencecup_eval_sets(root_dir: str | Path, shencecup_limit: int | None = None) -> Dict[str, List[Document]]:
     docs = load_shencecup_labeled(root_dir, limit=shencecup_limit)
     if not docs:
@@ -340,4 +383,5 @@ def build_all_eval_sets(
     )
     datasets.update(build_english_eval_sets(root_dir, english_limit=english_limit))
     datasets.update(build_shencecup_eval_sets(root_dir, shencecup_limit=shencecup_limit))
+    datasets.update(build_paper_eval_sets(root_dir))
     return datasets

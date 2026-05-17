@@ -130,7 +130,7 @@ class CandidateSegmentAttentionExtractor:
         layer: str = "auto",
         max_length: int = 1024,
         max_candidates: int = 30,
-        bio_profile: str = "clean",
+        bio_profile: str = "high_recall",
         candidate_order: str = "random",
         candidate_seed: int = 42,
         instruction: str = DEFAULT_SEGMENT_INSTRUCTION,
