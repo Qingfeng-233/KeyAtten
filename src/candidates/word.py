@@ -163,7 +163,62 @@ def segment_text(
             continue
         words.append(word)
         pos_tags.append(token.flag)
+
+    # 合并被标点切断的相邻英文词 (eng + punct + eng → eng)
+    words, pos_tags = _merge_split_eng_words(words, pos_tags)
+
     return words, pos_tags
+
+
+_ENG_PUNCT_RE = re.compile(r"^[-\s./\\@#&*+=~`|]+$")
+
+
+def _merge_split_eng_words(
+    words: list[str],
+    pos_tags: list[str],
+) -> tuple[list[str], list[str]]:
+    """Merge adjacent eng tokens separated by optional punctuation.
+
+    Handles:
+    - eng + punct + eng → e.g. "Meta" + "-" + "cognition" → "Meta-cognition"
+    - eng + eng (directly adjacent) → e.g. "Limbic" + "System" → "Limbic System"
+    """
+    if len(words) < 2:
+        return words, pos_tags
+
+    merged_words: list[str] = []
+    merged_pos: list[str] = []
+
+    i = 0
+    while i < len(words):
+        merged_words.append(words[i])
+        merged_pos.append(pos_tags[i])
+
+        if pos_tags[i].startswith("eng"):
+            # Case 1: eng + punct(x) + eng → merge with separator
+            while (
+                i + 2 < len(words)
+                and pos_tags[i + 1] == "x"
+                and _ENG_PUNCT_RE.match(words[i + 1])
+                and pos_tags[i + 2].startswith("eng")
+            ):
+                merged_words[-1] += words[i + 1] + words[i + 2]
+                i += 2
+
+            # Case 2: eng + eng (directly adjacent, space stripped by jieba)
+            while (
+                i + 1 < len(words)
+                and pos_tags[i + 1].startswith("eng")
+            ):
+                merged_words[-1] += " " + words[i + 1]
+                i += 1
+
+        i += 1
+
+    if len(merged_words) == len(words):
+        return words, pos_tags
+
+    return merged_words, merged_pos
 
 
 def build_candidates(
@@ -518,6 +573,127 @@ def candidate_rank_from_token_scores(
     )
 
 
+def merge_by_attention(
+    words: list[str],
+    pos_tags: list[str],
+    attention_map: np.ndarray,
+    word_ids: list[int | None],
+    merge_threshold: float = 0.3,
+) -> tuple[list[str], list[str], list[list[int]], bool]:
+    """Merge adjacent words guided by attention scores (language-agnostic).
+
+    Unlike ``merge_single_chars`` which only merges consecutive single-char
+    Chinese tokens, this function considers ALL adjacent valid word pairs
+    (including English, multi-char Chinese, etc.) and merges them when their
+    boundary-token attention exceeds the threshold.
+
+    Punctuation words (``x`` pos tag) between two valid words are skipped
+    when computing adjacency, allowing e.g. "Meta" + "cognition" to merge
+    even though jieba inserts "-" between them.
+
+    Returns:
+        (merged_words, merged_pos_tags, merge_map, changed)
+        - merge_map[new_idx] = [old_idx_1, ...] for rescore_with_new_words
+        - changed: True if any merging occurred
+    """
+    seq_len = attention_map.shape[0]
+
+    # Precompute adjacency scores between consecutive BERT tokens
+    adj_raw = np.zeros(seq_len, dtype=np.float32)
+    for i in range(seq_len - 1):
+        adj_raw[i] = (attention_map[i, i + 1] + attention_map[i + 1, i]) / 2.0
+    min_a, max_a = float(adj_raw.min()), float(adj_raw.max())
+    if max_a > min_a:
+        adj_norm = (adj_raw - min_a) / (max_a - min_a)
+    else:
+        adj_norm = np.zeros_like(adj_raw)
+
+    # Build word_id -> token indices mapping
+    word_to_tokens: dict[int, list[int]] = {}
+    for tok_idx, wid in enumerate(word_ids):
+        if wid is not None and 0 <= wid < len(words):
+            word_to_tokens.setdefault(wid, []).append(tok_idx)
+
+    def _boundary_score(w1: int, w2: int) -> float:
+        """Bidirectional attention between the last token of w1 and first token of w2."""
+        toks1 = word_to_tokens.get(w1, [])
+        toks2 = word_to_tokens.get(w2, [])
+        if not toks1 or not toks2:
+            return 0.0
+        t1 = toks1[-1]
+        t2 = toks2[0]
+        if t1 >= seq_len or t2 >= seq_len:
+            return 0.0
+        return float(adj_norm[t1])  # normalized score at boundary
+
+    # Identify valid word indices (non-punctuation)
+    valid_indices = [
+        i for i in range(len(words))
+        if not PUNCT_RE.match(words[i]) and words[i].strip()
+    ]
+
+    if len(valid_indices) < 2:
+        return list(words), list(pos_tags), [[i] for i in range(len(words))], False
+
+    # Greedy left-to-right merge
+    merged_words: list[str] = []
+    merged_pos: list[str] = []
+    merge_map: list[list[int]] = []
+    changed = False
+
+    group = [valid_indices[0]]
+
+    for vi in range(1, len(valid_indices)):
+        prev_wi = group[-1]
+        curr_wi = valid_indices[vi]
+
+        score = _boundary_score(prev_wi, curr_wi)
+        if score >= merge_threshold:
+            group.append(curr_wi)
+            changed = True
+        else:
+            # Flush current group
+            _flush_group(group, words, pos_tags, merged_words, merged_pos, merge_map)
+            group = [curr_wi]
+
+    _flush_group(group, words, pos_tags, merged_words, merged_pos, merge_map)
+
+    return merged_words, merged_pos, merge_map, changed
+
+
+def _flush_group(
+    group: list[int],
+    words: list[str],
+    pos_tags: list[str],
+    out_words: list[str],
+    out_pos: list[str],
+    out_map: list[list[int]],
+) -> None:
+    """Append a merged (or single) word from a group of word indices."""
+    if len(group) == 1:
+        wi = group[0]
+        out_words.append(words[wi])
+        out_pos.append(pos_tags[wi])
+        out_map.append([wi])
+    else:
+        # Merge: concatenate text, use most informative POS
+        text = "".join(words[wi] for wi in group)
+        # POS priority: if any eng → "eng", if any noun → "nz" (proper noun), else first
+        has_eng = any(pos_tags[wi].startswith("eng") for wi in group)
+        has_noun = any(pos_tags[wi].startswith("n") for wi in group)
+        if has_eng and has_noun:
+            pos = "nz"  # mixed language compound → proper noun
+        elif has_eng:
+            pos = "eng"
+        elif has_noun:
+            pos = "nz"
+        else:
+            pos = pos_tags[group[0]]
+        out_words.append(text)
+        out_pos.append(pos)
+        out_map.append(group)
+
+
 def merge_single_chars(
     words: list[str],
     pos_tags: list[str],
@@ -727,5 +903,6 @@ __all__ = [
     "candidate_rank_from_word_scores",
     "candidate_rank_from_token_scores",
     "merge_single_chars",
+    "merge_by_attention",
     "gravity_candidates",
 ]
