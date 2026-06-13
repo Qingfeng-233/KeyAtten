@@ -114,6 +114,37 @@ keywords = ext.extract_keywords(
 )
 ```
 
+### 缓存与增量 IDF
+
+```python
+ext = KeyAttenExtractor(
+    model="Qwen/Qwen3-Embedding-0.6B",
+    language="zh",
+    device="cuda",
+    dtype="float16",
+    cache_enabled=True,
+    cache_dir="cache",
+)
+
+# fit_idf 会从零重建 IDF 状态
+idf = ext.fit_idf(["旧文本一", "旧文本二"])
+
+# update_idf 只追加新文本的 document frequency
+idf = ext.update_idf(["新增文本三"])
+
+keywords = ext.extract_keywords(
+    "新增文本三",
+    method="fusion_attn_idf",
+    top_k=8,
+    idf_lookup=idf,
+)
+```
+
+开启缓存后，KeyAtten 会写入两层缓存：
+
+- `cache/keyatten_documents/`：IDF 前缓存，保存分词、候选、`token_counts` 和 attention 词分数；IDF 变化后可复用，不重跑模型。
+- `cache/keyatten_keywords/`：IDF 后缓存，保存某个 IDF 指纹下的最终关键词；同配置同 IDF 再次调用可直接返回。
+
 ### 词级权重
 
 ```python
@@ -378,6 +409,8 @@ KeyAttenExtractor(
     is_causal_override: bool | None = None,  # None=自动检测；False=强制按 encoder 读；True=强制按 decoder 读
     dedup_nested_for_topk5: bool = False,    # 仅在 top_k<=5 时启用子串去重后处理
     candidate_scoring: str = "word",         # "word" / "token_span" / "bio"
+    cache_enabled: bool = False,             # 是否启用磁盘缓存
+    cache_dir: str | Path = "cache",         # 缓存目录
 )
 ```
 
@@ -387,6 +420,7 @@ KeyAttenExtractor(
 | `extract_keywords_batch(texts, method, top_k, idf_lookup)` | `list[list[str]]` |
 | `extract_word_weights(text, method)` | `list[WordWeight]` |
 | `fit_idf(texts)` | `dict[str, float]` |
+| `update_idf(texts)` | `dict[str, float]` |
 
 `WordWeight` 包含字段：`word`、`index`、`weight`、`pos_tag`。
 
@@ -401,6 +435,8 @@ KeyAttenExtractor(
 - `dedup_nested_for_topk5=True` 时，仅在 `top_k<=5` 应用子串/超串去重，不影响 `@10`
 - `candidate_scoring="token_span"` 仅适用于原始字符串输入；外部分词输入仍然走原有词级排序路径
 - `candidate_scoring="bio"` 需要配套传入 `bio_model_path`，且仅适用于原始字符串输入
+- `fit_idf()` 会重建 IDF 状态；`update_idf()` 会在当前状态上增量追加新文档
+- `cache_enabled=True` 时，word 候选路径会同时缓存 IDF 前文档分数和 IDF 后最终关键词
 
 ## 引用
 

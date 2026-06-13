@@ -115,6 +115,37 @@ keywords = ext.extract_keywords(
 )
 ```
 
+### Cache And Incremental IDF
+
+```python
+ext = KeyAttenExtractor(
+    model="Qwen/Qwen3-Embedding-0.6B",
+    language="zh",
+    device="cuda",
+    dtype="float16",
+    cache_enabled=True,
+    cache_dir="cache",
+)
+
+# fit_idf rebuilds IDF state from scratch.
+idf = ext.fit_idf(["old text one", "old text two"])
+
+# update_idf only appends document frequencies for new texts.
+idf = ext.update_idf(["new text three"])
+
+keywords = ext.extract_keywords(
+    "new text three",
+    method="fusion_attn_idf",
+    top_k=8,
+    idf_lookup=idf,
+)
+```
+
+When caching is enabled, KeyAtten writes two cache layers:
+
+- `cache/keyatten_documents/`: pre-IDF cache with tokenization, candidates, `token_counts`, and attention word scores. It can be reused when IDF changes, avoiding another model forward pass.
+- `cache/keyatten_keywords/`: post-IDF cache with final keywords for a specific IDF fingerprint. Repeated calls with the same config and IDF can return directly.
+
 ### Word-Level Weights
 
 ```python
@@ -380,6 +411,8 @@ KeyAttenExtractor(
     is_causal_override: bool | None = None,  # None=auto detect; False=force encoder-style readout; True=force decoder-style readout
     dedup_nested_for_topk5: bool = False,    # enable substring de-dup post-processing only when top_k<=5
     candidate_scoring: str = "word",   # "word" / "token_span" / "bio"
+    cache_enabled: bool = False,       # enable disk cache
+    cache_dir: str | Path = "cache",   # cache directory
 )
 ```
 
@@ -389,6 +422,7 @@ KeyAttenExtractor(
 | `extract_keywords_batch(texts, method, top_k, idf_lookup)` | `list[list[str]]` |
 | `extract_word_weights(text, method)` | `list[WordWeight]` |
 | `fit_idf(texts)` | `dict[str, float]` |
+| `update_idf(texts)` | `dict[str, float]` |
 
 `WordWeight` fields: `word`, `index`, `weight`, `pos_tag`.
 
@@ -403,6 +437,8 @@ Notes:
 - when `dedup_nested_for_topk5=True`, substring/superstring de-dup is applied only for `top_k<=5`, not for `@10`
 - `candidate_scoring="token_span"` only applies to raw string input; external token input stays on the word-based ranking path
 - `candidate_scoring="bio"` requires `bio_model_path` and only applies to raw string input
+- `fit_idf()` rebuilds IDF state; `update_idf()` incrementally appends new documents to the current state
+- when `cache_enabled=True`, the word candidate path caches both pre-IDF document scores and post-IDF final keywords
 
 ## Citation
 
