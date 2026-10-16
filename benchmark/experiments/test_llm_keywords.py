@@ -147,9 +147,7 @@ def call_llm_api(content: str, model: str, api_key: str) -> Tuple[Optional[List[
 
 
 # 引入标准评测函数
-import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from keyword_bench.metrics import normalize_phrase, _prf_at_k
+from benchmark.keyword_bench.metrics import normalize_phrase, _prf_at_k
 
 
 def evaluate_single_doc(predictions: List[str], ground_truth: List[str]) -> Dict:

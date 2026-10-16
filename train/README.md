@@ -47,12 +47,13 @@ train/
     qk_lora.py            # legacy QK LoRA training
     llm_teacher.py        # LLM teacher helpers
     run_llm_labeling.py   # LLM labeling runner
-  bio_ckpt_ep13_production/
 ```
 
 ## Rules
 
 - Keep new runnable entry points behind `train/main.py`.
+- Run from the repo root (`python -m train.main ...`) with keyatten installed via `pip install -e .`.
+- Import with absolute repo-root paths (`benchmark.keyword_bench.*`, `train.jobs.*`); do not modify `sys.path`.
 - Put evaluation code under `train/eval/`.
 - Put training or labeling jobs under `train/jobs/`.
 - Do not add one-off diagnostics back into the root of `train/`.

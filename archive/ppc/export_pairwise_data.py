@@ -9,9 +9,9 @@ from typing import Iterable
 import numpy as np
 import torch
 
-from ...candidates import locate_word_offsets, candidate_char_spans
-from ...extractors.attention import KeyAttenExtractor
-from ...extractors.qk_lora import QKLoRAExtractor, compute_qk_scores
+from keyatten.candidates import locate_word_offsets, candidate_char_spans
+from keyatten.extractors.attention import KeyAttenExtractor
+from keyatten.extractors.qk_lora import QKLoRAExtractor, compute_qk_scores
 from .features import build_feature_row
 from .dataset import PairwiseExample
 

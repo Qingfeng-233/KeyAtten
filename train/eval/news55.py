@@ -3,16 +3,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 import time
 from copy import copy
 from pathlib import Path
 
 import torch
 
-sys.path.insert(0, "/root/Keyatten")
-sys.path.insert(0, "/root/Keyatten/benchmark")
-sys.path.insert(0, "/root/Keyatten/train")
 
 from benchmark.keyword_bench.data import Document
 from benchmark.keyword_bench.metrics import evaluate_predictions

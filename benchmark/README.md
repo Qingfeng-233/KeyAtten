@@ -17,11 +17,11 @@ Available commands:
 | `keyword` | `benchmark.eval.run_keyword_benchmark` | Run the main keyword benchmark. |
 | `hidden-head` | `benchmark.eval.run_hidden_head_benchmark` | Evaluate a hidden-state keyword head checkpoint. |
 | `llm-keyword` | `benchmark.eval.llm_keyword_benchmark` | Benchmark an OpenAI-compatible LLM keyword extractor. |
-| `bio-local-matrix` | `benchmark.scripts.eval_bio_local_matrix` | Run the local BIO/QK matrix evaluation. |
-| `bio-qk-combo` | `benchmark.scripts.eval_bio_qk_combo` | Run BIO-only, BIO+QK, and fused BIO/QK evaluation. |
-| `shence-heldout` | `benchmark.scripts.run_shence_heldout_eval` | Run ShenCe strict held-out evaluation. |
-| `gemini-heldout` | `benchmark.scripts.gemini_heldout_100` | Run Gemini held-out helper. |
-| `test-llm-keywords` | `benchmark.scripts.test_llm_keywords` | Run the LLM keyword smoke script. |
+| `bio-local-matrix` | `benchmark.experiments.eval_bio_local_matrix` | Run the local BIO/QK matrix evaluation. |
+| `bio-qk-combo` | `benchmark.experiments.eval_bio_qk_combo` | Run BIO-only, BIO+QK, and fused BIO/QK evaluation. |
+| `shence-heldout` | `benchmark.experiments.run_shence_heldout_eval` | Run ShenCe strict held-out evaluation. |
+| `gemini-heldout` | `benchmark.experiments.gemini_heldout_100` | Run Gemini held-out helper. |
+| `test-llm-keywords` | `benchmark.experiments.test_llm_keywords` | Run the LLM keyword smoke script. |
 | `download-hf-assets` | `benchmark.tools.download_hf_assets` | Download Hugging Face model assets. |
 | `gte-onnx-probe` | `benchmark.tools.gte_onnx_probe` | Validate `gte-small-zh` ONNX attention export. |
 | `remote-hidden-head` | `benchmark.tools.remote_hidden_head_runner` | Run the remote hidden-head helper. |
@@ -42,7 +42,7 @@ benchmark/
   main.py                 # command dispatcher
   keyword_bench/          # reusable data, method, metric, and output helpers
   eval/                   # primary benchmark evaluation jobs
-  scripts/                # experiment-specific benchmark jobs
+  experiments/            # experiment-specific benchmark jobs
   tools/                  # download, rendering, ONNX, and remote helper tools
 ```
 
@@ -50,9 +50,11 @@ benchmark/
 
 - Keep reusable benchmark logic under `keyword_bench/`.
 - Put stable evaluation jobs under `eval/`.
-- Put experiment-specific jobs under `scripts/`.
+- Put experiment-specific jobs under `experiments/`.
 - Put operational helpers under `tools/`.
 - New runnable files should be exposed through `benchmark/main.py`.
+- Run from the repo root (`python -m benchmark.main ...`) with keyatten installed via `pip install -e .`.
+- Import with absolute repo-root paths (`benchmark.keyword_bench.*`, `benchmark.eval.*`); do not modify `sys.path`.
 - Do not put generated outputs or model adapters under `benchmark/`.
 
 ## Outputs

@@ -8,16 +8,16 @@ import numpy as np
 import torch
 from transformers import AutoTokenizer
 
-from keyword_bench.data import (
+from benchmark.keyword_bench.data import (
     build_csl_eval_sets,
     build_english_eval_sets,
     build_shencecup_eval_sets,
 )
-from keyword_bench.hidden_state_head import (
+from benchmark.keyword_bench.hidden_state_head import (
     HiddenStateKeywordHead,
     aggregate_token_probs_to_words,
 )
-from keyword_bench.methods import (
+from benchmark.keyword_bench.methods import (
     build_candidates,
     candidate_rank_from_word_scores,
     combine_word_scores,
@@ -26,8 +26,8 @@ from keyword_bench.methods import (
     token_counter,
     word_scores_from_token_values,
 )
-from keyword_bench.metrics import evaluate_predictions
-from keyword_bench.output_paths import resolve_output_dir
+from benchmark.keyword_bench.metrics import evaluate_predictions
+from benchmark.keyword_bench.output_paths import resolve_output_dir
 
 
 def parse_args() -> argparse.Namespace:

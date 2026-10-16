@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import random
-import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -17,11 +16,8 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import AutoModel, AutoTokenizer, get_linear_schedule_with_warmup
 
-sys.path.insert(0, "/root/Keyatten")
-sys.path.insert(0, "/root/Keyatten/benchmark")
-sys.path.insert(0, "/root/Keyatten/train")
 
-from keyword_bench.data import Document, load_shencecup_labeled
+from benchmark.keyword_bench.data import Document, load_shencecup_labeled
 from train.jobs.attn_lora import (
     INSTRUCTION_PREFIX,
     _resolve_layer_arg,

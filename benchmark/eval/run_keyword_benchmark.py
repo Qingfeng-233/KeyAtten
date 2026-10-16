@@ -9,8 +9,8 @@ from typing import Dict, List
 import numpy as np
 from scipy.stats import pearsonr, spearmanr
 
-from keyword_bench.data import build_all_eval_sets
-from keyword_bench.methods import (
+from benchmark.keyword_bench.data import build_all_eval_sets
+from benchmark.keyword_bench.methods import (
     DEFAULT_ZH_CAUSAL_INSTRUCTION_PREFIX,
     batched_attention_word_scores,
     batched_hidden_word_scores,
@@ -30,8 +30,8 @@ from keyword_bench.methods import (
     word_scores_from_token_values,
     yake_keywords,
 )
-from keyword_bench.metrics import evaluate_predictions
-from keyword_bench.output_paths import resolve_output_dir
+from benchmark.keyword_bench.metrics import evaluate_predictions
+from benchmark.keyword_bench.output_paths import resolve_output_dir
 
 
 MODEL_REGISTRY = [

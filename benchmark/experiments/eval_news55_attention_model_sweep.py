@@ -4,14 +4,11 @@ from __future__ import annotations
 import argparse
 import gc
 import json
-import sys
 import time
 from pathlib import Path
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(PROJECT_ROOT / "benchmark"))
 
 import torch
 

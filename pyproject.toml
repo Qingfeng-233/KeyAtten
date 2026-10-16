@@ -73,8 +73,6 @@ full = [
 include-package-data = true
 packages = [
     "keyatten",
-    "keyatten._archive",
-    "keyatten._archive.ppc",
     "keyatten.candidates",
     "keyatten.extractors",
     "keyatten.scoring",

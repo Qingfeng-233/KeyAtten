@@ -29,7 +29,6 @@ import argparse
 import hashlib
 import json
 import random
-import sys
 import time
 from copy import copy
 from datetime import datetime
@@ -52,16 +51,14 @@ TRAIN_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = TRAIN_DIR.parent
 BENCHMARK_DIR = PROJECT_ROOT / "benchmark"
 MODELS_ROOT = PROJECT_ROOT / "models"
-sys.path.insert(0, str(BENCHMARK_DIR))
-sys.path.insert(0, str(PROJECT_ROOT))
 
-from keyword_bench.data import (
+from benchmark.keyword_bench.data import (
     Document,
     load_csl_split,
     load_multi_domain_jsonl,
     load_shencecup_labeled,
 )
-from keyword_bench.metrics import evaluate_predictions
+from benchmark.keyword_bench.metrics import evaluate_predictions
 from keyatten.candidates import build_candidates, segment_text
 from keyatten.candidates.bio_mining import find_candidate_occurrences
 from keyatten.scoring import DEFAULT_ZH_CAUSAL_INSTRUCTION_PREFIX

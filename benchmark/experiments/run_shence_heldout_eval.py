@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import json
 import random
-import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -19,15 +18,11 @@ from transformers import AutoModel, AutoTokenizer
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK_ROOT = REPO_ROOT / "benchmark"
-EVAL_DIR = BENCHMARK_ROOT / "eval"
-sys.path.insert(0, str(REPO_ROOT))
-sys.path.insert(0, str(BENCHMARK_ROOT))
-sys.path.insert(0, str(EVAL_DIR))
 
-import run_keyword_benchmark as benchmark_runner
-from keyword_bench.data import Document, load_shencecup_labeled
-from keyword_bench.metrics import evaluate_predictions
-from keyword_bench.methods import DEFAULT_ZH_CAUSAL_INSTRUCTION_PREFIX, build_model_bundle
+from benchmark.eval import run_keyword_benchmark as benchmark_runner
+from benchmark.keyword_bench.data import Document, load_shencecup_labeled
+from benchmark.keyword_bench.metrics import evaluate_predictions
+from benchmark.keyword_bench.methods import DEFAULT_ZH_CAUSAL_INSTRUCTION_PREFIX, build_model_bundle
 from keyatten.candidates import build_candidates, segment_text
 from keyatten.candidates.bio_mining import find_candidate_occurrences
 

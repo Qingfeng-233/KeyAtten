@@ -7,17 +7,14 @@ Download missing models with:
     python -m keyatten.download_models --model gte-small-zh
     python -m keyatten.download_models --source huggingface
 
-Usage:
-    python src/test_all.py
+Usage (from repo root, with keyatten installed via `pip install -e .`):
+    python tests/test_all.py
 """
 from __future__ import annotations
 
 import sys
 import time
 from pathlib import Path
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from keyatten import CandidateSegmentAttentionExtractor, KeyAttenExtractor, QKLoRAExtractor
 from keyatten.download_models import check_all_models, download_model

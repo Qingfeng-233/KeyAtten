@@ -5,15 +5,14 @@ import argparse
 import importlib
 import sys
 from collections.abc import Callable
-from pathlib import Path
 
 
 def _run_module(module_name: str, argv: list[str]) -> None:
-    project_root = Path(__file__).resolve().parents[1]
-    for path in (project_root, project_root / "benchmark", project_root / "train"):
-        path_text = str(path)
-        if path_text not in sys.path:
-            sys.path.insert(0, path_text)
+    """Import a job module by its repo-root dotted path and call its main() with argv.
+
+    Must be launched from the repo root via `python -m <pkg>.main` so that
+    `benchmark`, `train` resolve as packages; keyatten comes from `pip install -e .`.
+    """
     module = importlib.import_module(module_name)
     previous_argv = sys.argv[:]
     sys.argv = [module_name, *argv]

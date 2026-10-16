@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from transformers import AutoModel, AutoTokenizer
-from keyword_bench.output_paths import resolve_output_path
+from benchmark.keyword_bench.output_paths import resolve_output_path
 
 try:
     import onnx  # noqa: F401

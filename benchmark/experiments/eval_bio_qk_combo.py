@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import sys
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
@@ -13,21 +12,17 @@ from transformers import AutoModel, AutoTokenizer
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK_ROOT = REPO_ROOT / "benchmark"
-EVAL_DIR = BENCHMARK_ROOT / "eval"
-sys.path.insert(0, str(REPO_ROOT))
-sys.path.insert(0, str(BENCHMARK_ROOT))
-sys.path.insert(0, str(EVAL_DIR))
 
-from benchmark.scripts.run_shence_heldout_eval import (  # noqa: E402
+from benchmark.experiments.run_shence_heldout_eval import (
     TOP_K,
     MAX_LENGTH,
     build_shence_split,
     compute_qk_scores,
 )
-from keyword_bench.metrics import evaluate_predictions  # noqa: E402
-from keyatten import BIOExtractor  # noqa: E402
-from keyatten.candidates.bio_mining import find_candidate_occurrences  # noqa: E402
-from keyatten.scoring import DEFAULT_ZH_CAUSAL_INSTRUCTION_PREFIX  # noqa: E402
+from benchmark.keyword_bench.metrics import evaluate_predictions
+from keyatten import BIOExtractor
+from keyatten.candidates.bio_mining import find_candidate_occurrences
+from keyatten.scoring import DEFAULT_ZH_CAUSAL_INSTRUCTION_PREFIX
 
 
 def parse_args() -> argparse.Namespace:

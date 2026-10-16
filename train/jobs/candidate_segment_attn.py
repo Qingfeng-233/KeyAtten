@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import json
 import random
-import sys
 import time
 from copy import copy
 from datetime import datetime
@@ -23,13 +22,10 @@ except ImportError as exc:
 
 TRAIN_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = TRAIN_DIR.parents[1]
-BENCHMARK_DIR = PROJECT_ROOT / "benchmark"
 MODELS_ROOT = PROJECT_ROOT / "models"
-sys.path.insert(0, str(BENCHMARK_DIR))
-sys.path.insert(0, str(PROJECT_ROOT))
 
-from keyword_bench.data import Document, load_multi_domain_jsonl
-from keyword_bench.metrics import evaluate_predictions
+from benchmark.keyword_bench.data import Document, load_multi_domain_jsonl
+from benchmark.keyword_bench.metrics import evaluate_predictions
 from keyatten import BIOExtractor
 
 

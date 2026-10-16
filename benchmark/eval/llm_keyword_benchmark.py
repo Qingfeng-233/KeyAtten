@@ -6,7 +6,6 @@ import getpass
 import json
 import os
 import re
-import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -14,13 +13,10 @@ from typing import Any
 import requests
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BENCHMARK_DIR = REPO_ROOT / "benchmark"
-if str(BENCHMARK_DIR) not in sys.path:
-    sys.path.insert(0, str(BENCHMARK_DIR))
 
-from keyword_bench.data import build_all_eval_sets  # noqa: E402
-from keyword_bench.metrics import evaluate_predictions  # noqa: E402
-from keyword_bench.output_paths import resolve_output_dir  # noqa: E402
+from benchmark.keyword_bench.data import build_all_eval_sets
+from benchmark.keyword_bench.metrics import evaluate_predictions
+from benchmark.keyword_bench.output_paths import resolve_output_dir
 
 
 def parse_args() -> argparse.Namespace:

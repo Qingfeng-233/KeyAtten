@@ -1,6 +1,5 @@
 """BIO-only baseline: rank candidates by BIO confidence, no attention LoRA."""
-import sys, json, time, random, argparse
-sys.path.insert(0, "/root/Keyatten")
+import json, time, random, argparse
 
 from copy import copy
 from pathlib import Path

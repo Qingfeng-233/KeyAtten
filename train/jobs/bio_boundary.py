@@ -5,7 +5,6 @@ import hashlib
 import json
 import random
 import re
-import sys
 from copy import copy
 from pathlib import Path
 from typing import Sequence
@@ -15,18 +14,12 @@ import torch
 from torch.utils.data import DataLoader
 from transformers import AutoModel, AutoTokenizer
 
-TRAIN_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = TRAIN_DIR.parent
-BENCHMARK_DIR = PROJECT_ROOT / "benchmark"
-sys.path.insert(0, str(BENCHMARK_DIR))
-sys.path.insert(0, str(PROJECT_ROOT))
-
-from keyword_bench.data import (
+from benchmark.keyword_bench.data import (
     build_csl_eval_sets,
     build_shencecup_eval_sets,
     load_multi_domain_jsonl,
 )
-from keyword_bench.bio_boundary_head import (
+from benchmark.keyword_bench.bio_boundary_head import (
     BIOBoundaryHead,
     TokenizedBIOExample,
     IGNORE_LABEL,
@@ -38,7 +31,7 @@ from keyword_bench.bio_boundary_head import (
     extract_keywords_relaxed_windowed,
     tokenize_with_bio_labels,
 )
-from keyword_bench.output_paths import resolve_output_dir
+from benchmark.keyword_bench.output_paths import resolve_output_dir
 from keyatten.candidates.bio_mining import build_bio_positive_phrases
 from keyatten.candidates import (
     build_candidates,
@@ -85,7 +78,7 @@ def parse_args() -> argparse.Namespace:
                         help="Include ShenCeCup labeled data as training data")
     parser.add_argument("--no-shencecup", dest="include_shencecup", action="store_false")
     parser.add_argument("--thucnews-jsonl", type=str, default=None,
-                        help="Path to thucnews_annotated.jsonl (extractive, 100%)")
+                        help="Path to thucnews_annotated.jsonl (extractive, 100%%)")
     parser.add_argument("--thucnews-limit", type=int, default=8000)
     parser.add_argument("--md-jsonl", type=str, default=None,
                         help="Path to multi-domain annotated JSONL for extra training data")

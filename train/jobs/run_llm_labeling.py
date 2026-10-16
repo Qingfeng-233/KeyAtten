@@ -5,14 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import random
-import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, "/root/Keyatten")
-sys.path.insert(0, "/root/Keyatten/benchmark")
 
-from keyword_bench.data import Document, load_multi_domain_jsonl, load_shencecup_labeled
+from benchmark.keyword_bench.data import Document, load_multi_domain_jsonl, load_shencecup_labeled
 
 from train.jobs.llm_teacher import QwenKeywordTeacher
 

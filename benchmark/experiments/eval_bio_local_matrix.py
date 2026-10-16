@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import random
-import sys
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
@@ -13,20 +12,16 @@ from transformers import AutoModel, AutoTokenizer
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK_ROOT = REPO_ROOT / "benchmark"
-EVAL_DIR = BENCHMARK_ROOT / "eval"
-sys.path.insert(0, str(REPO_ROOT))
-sys.path.insert(0, str(BENCHMARK_ROOT))
-sys.path.insert(0, str(EVAL_DIR))
 
-from benchmark.scripts.eval_bio_qk_combo import (  # noqa: E402
+from benchmark.experiments.eval_bio_qk_combo import (
     extract_bio_candidates,
     rank_candidates_with_fusion,
     score_candidates_with_qk_from_list,
 )
-from benchmark.scripts.run_shence_heldout_eval import build_shence_split  # noqa: E402
-from keyword_bench.data import Document, load_multi_domain_jsonl  # noqa: E402
-from keyword_bench.metrics import evaluate_predictions  # noqa: E402
-from keyatten import BIOExtractor  # noqa: E402
+from benchmark.experiments.run_shence_heldout_eval import build_shence_split
+from benchmark.keyword_bench.data import Document, load_multi_domain_jsonl
+from benchmark.keyword_bench.metrics import evaluate_predictions
+from keyatten import BIOExtractor
 
 
 def parse_args() -> argparse.Namespace:

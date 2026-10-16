@@ -8,9 +8,7 @@ Sweeps α ∈ {0.0, 0.25, 0.5, 0.75, 1.0} (and any user-provided values).
 
 Adapter dirs are evaluated against thucnews_heldout (true held-out).
 """
-import sys, json, time, random, argparse
-sys.path.insert(0, "/root/Keyatten")
-sys.path.insert(0, "/root/Keyatten/train")
+import json, time, random, argparse
 
 from copy import copy
 from pathlib import Path
@@ -166,7 +164,6 @@ def score_candidates_fusion(doc, tokenizer, model, device, instruction_prefix,
 
 
 def eval_attn_fusion(adapter_dir, args, datasets, bio):
-    sys.path.insert(0, "/root/Keyatten/train")
     from train.jobs.attn_lora import INSTRUCTION_PREFIX
     from transformers import AutoModel, AutoTokenizer
     from peft import PeftModel

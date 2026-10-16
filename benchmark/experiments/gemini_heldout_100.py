@@ -13,21 +13,17 @@ import concurrent.futures as futures
 import json
 import os
 import random
-import sys
 import time
 from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-BENCHMARK_DIR = REPO_ROOT / "benchmark"
 
-if str(BENCHMARK_DIR) not in sys.path:
-    sys.path.insert(0, str(BENCHMARK_DIR))
 
-from keyword_bench.data import load_shencecup_labeled  # noqa: E402
-from keyword_bench.metrics import evaluate_predictions  # noqa: E402
-from keyword_bench.output_paths import resolve_output_dir  # noqa: E402
-from llm_keyword_benchmark import (  # noqa: E402
+from benchmark.keyword_bench.data import load_shencecup_labeled
+from benchmark.keyword_bench.metrics import evaluate_predictions
+from benchmark.keyword_bench.output_paths import resolve_output_dir
+from benchmark.eval.llm_keyword_benchmark import (
     build_messages,
     extract_json_array,
     request_keywords,
