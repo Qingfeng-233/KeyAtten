@@ -1,18 +1,17 @@
-from __future__ import annotations
+"""BIO boundary head: model class and span decoding helpers.
 
-"""Compatibility shim: re-exports BIO boundary head components for src/ use.
-
-The canonical implementation lives in benchmark/keyword_bench/bio_boundary_head.py.
-This module copies only the inference-critical pieces (model class, decode helpers)
-so that src/ does not depend on benchmark/.
+Single source of truth for the BIO head. Training-only helpers (label alignment,
+collation, span F1) live in benchmark/keyword_bench/bio_boundary_head.py and
+import the model and decoders from here.
 """
 
-from dataclasses import dataclass
+from __future__ import annotations
+
 from typing import Sequence
 
-import numpy as np
 import torch
 from torch import nn
+from torch.nn import functional as F
 from transformers import AutoConfig, AutoModel
 
 try:
@@ -39,10 +38,13 @@ class BIOBoundaryHead(nn.Module):
         freeze_backbone: bool = True,
         trust_remote_code: bool = True,
         init_from_config: bool = False,
+        aux_tag_loss_weight: float = 0.0,
+        tag_loss_weights: Sequence[float] | None = None,
     ) -> None:
         super().__init__()
         self.model_name = model_name
         self.layer_index = int(layer_index)
+        self.aux_tag_loss_weight = float(aux_tag_loss_weight)
         if init_from_config:
             config = AutoConfig.from_pretrained(
                 model_name,
@@ -58,6 +60,17 @@ class BIOBoundaryHead(nn.Module):
         hidden_size = int(self.backbone.config.hidden_size)
         self.classifier = nn.Linear(hidden_size, NUM_TAGS)
         self.crf = CRF(num_tags=NUM_TAGS, batch_first=True)
+        if tag_loss_weights is not None:
+            if len(tag_loss_weights) != NUM_TAGS:
+                raise ValueError(
+                    f"tag_loss_weights must have {NUM_TAGS} values, got {len(tag_loss_weights)}"
+                )
+            self.register_buffer(
+                "tag_loss_weights",
+                torch.tensor(tag_loss_weights, dtype=torch.float32),
+            )
+        else:
+            self.tag_loss_weights = None
         if freeze_backbone:
             for parameter in self.backbone.parameters():
                 parameter.requires_grad = False
@@ -67,6 +80,8 @@ class BIOBoundaryHead(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         labels: torch.Tensor | None = None,
+        aux_labels: torch.Tensor | None = None,
+        aux_weights: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         outputs = self.backbone(
             input_ids=input_ids,
@@ -92,8 +107,44 @@ class BIOBoundaryHead(nn.Module):
             log_likelihood = self.crf(emissions, clean_labels, mask=crf_mask)
             result["log_likelihood"] = log_likelihood
             batch_size = emissions.size(0)
-            result["loss"] = -log_likelihood / batch_size
+            crf_loss = -log_likelihood / batch_size
+            result["crf_loss"] = crf_loss
+            total_loss = crf_loss
+            if self.aux_tag_loss_weight > 0.0:
+                aux_loss = self._aux_tag_loss(emissions, labels, aux_labels, aux_weights)
+                result["aux_tag_loss"] = aux_loss
+                total_loss = total_loss + self.aux_tag_loss_weight * aux_loss
+            result["loss"] = total_loss
         return result
+
+    def _aux_tag_loss(
+        self,
+        emissions: torch.Tensor,
+        labels: torch.Tensor,
+        aux_labels: torch.Tensor | None,
+        aux_weights: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Token-level cross-entropy on emissions, optionally weighted per token."""
+        aux_targets = labels if aux_labels is None else aux_labels
+        aux_loss_vector = F.cross_entropy(
+            emissions.reshape(-1, NUM_TAGS),
+            aux_targets.reshape(-1),
+            weight=self.tag_loss_weights,
+            ignore_index=IGNORE_LABEL,
+            reduction="none",
+        )
+        valid_mask = aux_targets.reshape(-1) != IGNORE_LABEL
+        if aux_weights is not None:
+            flat_weights = aux_weights.reshape(-1).to(aux_loss_vector.dtype)
+            valid_mask = valid_mask & (flat_weights > 0)
+            if not torch.any(valid_mask):
+                return aux_loss_vector.new_zeros(())
+            return (
+                aux_loss_vector[valid_mask] * flat_weights[valid_mask]
+            ).sum() / flat_weights[valid_mask].sum().clamp_min(1e-8)
+        if not torch.any(valid_mask):
+            return aux_loss_vector.new_zeros(())
+        return aux_loss_vector[valid_mask].mean()
 
     def decode(
         self,
@@ -283,6 +334,8 @@ def extract_keywords_relaxed_windowed(
             stride_int = max(0, int(stride))
             if stride_int not in stride_values:
                 stride_values.append(stride_int)
+    if not stride_values:
+        stride_values = [max(0, int(window_stride))]
     merged: dict[str, tuple[str, float]] = {}
     model.eval()
     with torch.no_grad():
