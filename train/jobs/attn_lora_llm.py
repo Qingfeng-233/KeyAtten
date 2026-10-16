@@ -26,13 +26,13 @@ from train.jobs.attn_lora import (
 )
 
 
-PROJECT_ROOT = Path("/root/Keyatten")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--labels", default="/root/Keyatten/train/data/llm_labels_1k.jsonl")
-    parser.add_argument("--model", default="/root/Keyatten/models/gte-small-zh")
+    parser.add_argument("--labels", default=str(PROJECT_ROOT / "train" / "data" / "llm_labels_1k.jsonl"))
+    parser.add_argument("--model", default=str(PROJECT_ROOT / "models" / "gte-small-zh"))
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--layer", default="auto")
@@ -47,7 +47,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--lora-alpha", type=int, default=16)
     parser.add_argument("--lora-dropout", type=float, default=0.1)
     parser.add_argument("--lora-targets", default="q_proj,k_proj,v_proj")
-    parser.add_argument("--bio-ckpt", default="/root/Keyatten/train/remote_pull_resume16_epoch13/best_full_ckpt.pt")
+    parser.add_argument("--bio-ckpt", default=str(PROJECT_ROOT / "train" / "remote_pull_resume16_epoch13" / "best_full_ckpt.pt"))
     parser.add_argument("--bio-profile", choices=("clean", "balanced", "high_recall"), default="clean")
     parser.add_argument("--dev-limit", type=int, default=100)
     parser.add_argument("--top-k", type=int, default=10)
@@ -191,7 +191,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     random.seed(args.seed)
     torch.manual_seed(args.seed)
-    output_dir = Path(args.output_dir or f"/root/Keyatten/models/exp_llm_smoke_1k/{datetime.now():%Y%m%d_%H%M}")
+    output_dir = Path(args.output_dir or PROJECT_ROOT / "models" / "exp_llm_smoke_1k" / f"{datetime.now():%Y%m%d_%H%M}")
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"[info] output={output_dir}", flush=True)
 

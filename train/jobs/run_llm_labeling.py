@@ -14,7 +14,7 @@ from benchmark.keyword_bench.data import Document, load_multi_domain_jsonl, load
 from train.jobs.llm_teacher import QwenKeywordTeacher
 
 
-PROJECT_ROOT = Path("/root/Keyatten")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MD_PATH = PROJECT_ROOT / "train" / "data" / "multi_domain.jsonl"
 
 
@@ -56,8 +56,8 @@ def write_record(handle, doc: Document, llm_keywords: list[str], raw_output: str
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="/root/Keyatten/models/Qwen3.5-4B")
-    parser.add_argument("--output", default="/root/Keyatten/train/data/llm_labels_1k.jsonl")
+    parser.add_argument("--model", default=str(PROJECT_ROOT / "models" / "Qwen3.5-4B"))
+    parser.add_argument("--output", default=str(PROJECT_ROOT / "train" / "data" / "llm_labels_1k.jsonl"))
     parser.add_argument("--limit", type=int, default=1000)
     parser.add_argument("--source", choices=("mixed", "shence", "md"), default="mixed")
     parser.add_argument("--sanity", action="store_true")

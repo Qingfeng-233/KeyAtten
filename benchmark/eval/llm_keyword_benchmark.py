@@ -12,7 +12,7 @@ from typing import Any
 
 import requests
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 from benchmark.keyword_bench.data import build_all_eval_sets
 from benchmark.keyword_bench.metrics import evaluate_predictions

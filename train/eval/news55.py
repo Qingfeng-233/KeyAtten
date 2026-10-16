@@ -15,7 +15,7 @@ from benchmark.keyword_bench.metrics import evaluate_predictions
 from keyatten import BIOExtractor
 from train.eval.fusion import eval_attn_fusion
 
-PROJECT_ROOT = Path("/root/Keyatten")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA = PROJECT_ROOT / "data" / "news_annotated.jsonl"
 DEFAULT_BIO_CKPT = PROJECT_ROOT / "train" / "remote_pull_resume16_epoch13" / "best_full_ckpt.pt"
 
@@ -95,8 +95,8 @@ def run_attn_adapters(args: argparse.Namespace, docs: list[Document], bio: BIOEx
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate all available methods on clean news55 annotations.")
     parser.add_argument("--data", default=str(DEFAULT_DATA))
-    parser.add_argument("--out", default="/root/Keyatten/outputs/news55_all_methods_eval.json")
-    parser.add_argument("--base-model", default="/root/Keyatten/models/gte-small-zh")
+    parser.add_argument("--out", default=str(PROJECT_ROOT / "outputs" / "news55_all_methods_eval.json"))
+    parser.add_argument("--base-model", default=str(PROJECT_ROOT / "models" / "gte-small-zh"))
     parser.add_argument("--bio-ckpt", default=str(DEFAULT_BIO_CKPT))
     parser.add_argument("--bio-profile", choices=("clean", "balanced", "high_recall"), default="clean")
     parser.add_argument("--device", default="cuda")
@@ -105,9 +105,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--alphas", type=float, nargs="+", default=[0.0, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.9, 1.0])
     parser.add_argument("--methods", nargs="+", choices=("bio", "attn"), default=["bio", "attn"])
     parser.add_argument("--adapter-dirs", nargs="+", default=[
-        "/root/Keyatten/models/exp1_soft_kl_1k/best_adapter",
-        "/root/Keyatten/models/exp5_soft_kl_full_10k/best_adapter",
-        "/root/Keyatten/models/exp_llm_qwen35_1k/best_adapter",
+        str(PROJECT_ROOT / "models" / "exp1_soft_kl_1k" / "best_adapter"),
+        str(PROJECT_ROOT / "models" / "exp5_soft_kl_full_10k" / "best_adapter"),
+        str(PROJECT_ROOT / "models" / "exp_llm_qwen35_1k" / "best_adapter"),
     ])
     parser.add_argument("--attn-layer", type=int, default=4)
     parser.add_argument("--attn-method", default="received_attn")

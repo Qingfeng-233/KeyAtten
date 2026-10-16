@@ -47,9 +47,7 @@ try:
 except ImportError as _exc:
     raise RuntimeError("peft is required. Install with: pip install peft>=0.10.0") from _exc
 
-TRAIN_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = TRAIN_DIR.parent
-BENCHMARK_DIR = PROJECT_ROOT / "benchmark"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MODELS_ROOT = PROJECT_ROOT / "models"
 
 from benchmark.keyword_bench.data import (
@@ -63,7 +61,6 @@ from keyatten.candidates import build_candidates, segment_text
 from keyatten.candidates.bio_mining import find_candidate_occurrences
 from keyatten.scoring import DEFAULT_ZH_CAUSAL_INSTRUCTION_PREFIX
 
-DATA_DIR = BENCHMARK_DIR / "data"
 DEFAULT_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 DEFAULT_LAYER = "auto"
 INSTRUCTION_PREFIX = DEFAULT_ZH_CAUSAL_INSTRUCTION_PREFIX
@@ -146,9 +143,8 @@ def _iter_root_candidates(user_root: str | None) -> List[Path]:
         candidates.append(Path(user_root))
     candidates.extend(
         [
-            BENCHMARK_DIR,
-            BENCHMARK_DIR.parent,
-            BENCHMARK_DIR.parent / "测试沙箱",
+            PROJECT_ROOT,
+            PROJECT_ROOT / "测试沙箱",
         ]
     )
 
