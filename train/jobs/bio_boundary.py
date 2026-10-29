@@ -14,25 +14,6 @@ import torch
 from torch.utils.data import DataLoader
 from transformers import AutoModel, AutoTokenizer
 
-from benchmark.keyword_bench.data import (
-    build_csl_eval_sets,
-    build_shencecup_eval_sets,
-    load_multi_domain_jsonl,
-)
-from benchmark.keyword_bench.bio_boundary_head import (
-    BIOBoundaryHead,
-    TokenizedBIOExample,
-    IGNORE_LABEL,
-    TAG_B,
-    TAG_I,
-    TAG_O,
-    char_mask_to_bio_tags,
-    collate_bio_examples,
-    extract_keywords_relaxed_windowed,
-    tokenize_with_bio_labels,
-)
-from benchmark.keyword_bench.output_paths import resolve_output_dir
-from keyatten.candidates.bio_mining import build_bio_positive_phrases
 from keyatten.candidates import (
     build_candidates,
     candidate_char_spans,
@@ -40,11 +21,42 @@ from keyatten.candidates import (
     locate_word_offsets,
     segment_text,
 )
-
+from keyatten.candidates.bio_mining import build_bio_positive_phrases
+from benchmark.keyword_bench.bio_boundary_head import (
+    IGNORE_LABEL,
+    TAG_B,
+    TAG_I,
+    TAG_O,
+    BIOBoundaryHead,
+    TokenizedBIOExample,
+    char_mask_to_bio_tags,
+    collate_bio_examples,
+    extract_keywords_relaxed_windowed,
+    tokenize_with_bio_labels,
+)
+from benchmark.keyword_bench.data import (
+    build_csl_eval_sets,
+    build_shencecup_eval_sets,
+    load_multi_domain_jsonl,
+)
+from benchmark.keyword_bench.output_paths import resolve_output_dir
 
 CACHE_FORMAT_VERSION = 3
 _AUX_BOUNDARY_FUNC_WORDS = {
-    "的", "了", "和", "与", "并", "及", "在", "将", "对", "中", "上", "下", "内", "外",
+    "的",
+    "了",
+    "和",
+    "与",
+    "并",
+    "及",
+    "在",
+    "将",
+    "对",
+    "中",
+    "上",
+    "下",
+    "内",
+    "外",
 }
 _AUX_PUNCT_RE = re.compile(r"^[\W_]+$", re.UNICODE)
 
@@ -64,24 +76,48 @@ def parse_args() -> argparse.Namespace:
         default="Qwen/Qwen3-Embedding-0.6B",
         help="Backbone model name",
     )
-    parser.add_argument("--train-dataset", default="csl_train_sample",
-                        help="Only used for dev/test set resolution")
-    parser.add_argument("--dev-dataset", default="shencecup_labeled",
-                        help="Dev dataset name (shencecup_labeled recommended for extractive)")
-    parser.add_argument("--train-limit", type=int, default=0,
-                        help="CSL train limit (0 = skip CSL for training)")
+    parser.add_argument(
+        "--train-dataset",
+        default="csl_train_sample",
+        help="Only used for dev/test set resolution",
+    )
+    parser.add_argument(
+        "--dev-dataset",
+        default="shencecup_labeled",
+        help="Dev dataset name (shencecup_labeled recommended for extractive)",
+    )
+    parser.add_argument(
+        "--train-limit",
+        type=int,
+        default=0,
+        help="CSL train limit (0 = skip CSL for training)",
+    )
     parser.add_argument("--dev-limit", type=int, default=200)
     parser.add_argument("--test-limit", type=int, default=300)
     parser.add_argument("--derived-limit", type=int, default=200)
     parser.add_argument("--shencecup-limit", type=int, default=None)
-    parser.add_argument("--include-shencecup", action="store_true", default=True,
-                        help="Include ShenCeCup labeled data as training data")
-    parser.add_argument("--no-shencecup", dest="include_shencecup", action="store_false")
-    parser.add_argument("--thucnews-jsonl", type=str, default=None,
-                        help="Path to thucnews_annotated.jsonl (extractive, 100%%)")
+    parser.add_argument(
+        "--include-shencecup",
+        action="store_true",
+        default=True,
+        help="Include ShenCeCup labeled data as training data",
+    )
+    parser.add_argument(
+        "--no-shencecup", dest="include_shencecup", action="store_false"
+    )
+    parser.add_argument(
+        "--thucnews-jsonl",
+        type=str,
+        default=None,
+        help="Path to thucnews_annotated.jsonl (extractive, 100%%)",
+    )
     parser.add_argument("--thucnews-limit", type=int, default=8000)
-    parser.add_argument("--md-jsonl", type=str, default=None,
-                        help="Path to multi-domain annotated JSONL for extra training data")
+    parser.add_argument(
+        "--md-jsonl",
+        type=str,
+        default=None,
+        help="Path to multi-domain annotated JSONL for extra training data",
+    )
     parser.add_argument("--md-limit", type=int, default=8000)
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--batch-size", type=int, default=8)
@@ -129,8 +165,12 @@ def parse_args() -> argparse.Namespace:
         default="recall_at_k",
         help="Metric used for best-checkpoint selection",
     )
-    parser.add_argument("--resume", type=str, default=None,
-                        help="Path to full checkpoint (best_full_ckpt.pt) to resume training from")
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to full checkpoint (best_full_ckpt.pt) to resume training from",
+    )
     parser.add_argument(
         "--cache-dir",
         type=str,
@@ -344,7 +384,11 @@ def _build_aux_char_targets(
             continue
         if positive_support[index] > 0:
             continue
-        if _AUX_PUNCT_RE.match(char) or char in _AUX_BOUNDARY_FUNC_WORDS or _is_cjk_single_char(char):
+        if (
+            _AUX_PUNCT_RE.match(char)
+            or char in _AUX_BOUNDARY_FUNC_WORDS
+            or _is_cjk_single_char(char)
+        ):
             if aux_negative_weight >= aux_weights[index]:
                 aux_labels[index] = TAG_O
                 aux_weights[index] = aux_negative_weight
@@ -372,7 +416,11 @@ def _char_aux_to_token_aux(
         best_label = IGNORE_LABEL
         best_weight = 0.0
         for label in (TAG_B, TAG_I, TAG_O):
-            label_weights = [weight for current_label, weight in zip(span_labels, span_weights) if current_label == label]
+            label_weights = [
+                weight
+                for current_label, weight in zip(span_labels, span_weights)
+                if current_label == label
+            ]
             if not label_weights:
                 continue
             current_weight = max(label_weights)
@@ -450,7 +498,7 @@ def build_bio_examples(
 
 
 def _docs_signature(docs) -> str:
-    digest = hashlib.sha1()
+    digest = hashlib.sha256()
     for doc in docs:
         digest.update(str(getattr(doc, "doc_id", "")).encode("utf-8", errors="ignore"))
         digest.update(b"\0")
@@ -493,7 +541,7 @@ def _cache_path(
         "doc_count": len(docs),
         "docs_signature": _docs_signature(docs),
     }
-    key = hashlib.sha1(
+    key = hashlib.sha256(
         json.dumps(key_payload, ensure_ascii=True, sort_keys=True).encode("utf-8")
     ).hexdigest()
     return cache_dir / f"{split_name}_{key}.pt"
@@ -716,8 +764,10 @@ def main() -> None:
         all_eval_sets.update(
             build_csl_eval_sets(
                 root_dir,
-                train_limit=0, dev_limit=args.dev_limit,
-                test_limit=args.test_limit, derived_limit=args.derived_limit,
+                train_limit=0,
+                dev_limit=args.dev_limit,
+                test_limit=args.test_limit,
+                derived_limit=args.derived_limit,
             )
         )
     if any(name.startswith("shencecup_") for name in requested):
@@ -732,7 +782,9 @@ def main() -> None:
     # ShenCeCup (extractive, 98.6%)
     shencecup_docs: list = []
     if args.include_shencecup:
-        shencecup_sets = build_shencecup_eval_sets(root_dir, shencecup_limit=args.shencecup_limit)
+        shencecup_sets = build_shencecup_eval_sets(
+            root_dir, shencecup_limit=args.shencecup_limit
+        )
         if "shencecup_labeled" in shencecup_sets:
             shencecup_docs = shencecup_sets["shencecup_labeled"]
             print(f"[info] Loaded {len(shencecup_docs)} ShenCeCup docs for training")
@@ -743,7 +795,9 @@ def main() -> None:
         thucnews_path = Path(args.thucnews_jsonl)
         if not thucnews_path.is_absolute():
             thucnews_path = root_dir / thucnews_path
-        thucnews_docs = load_multi_domain_jsonl(thucnews_path, limit=args.thucnews_limit)
+        thucnews_docs = load_multi_domain_jsonl(
+            thucnews_path, limit=args.thucnews_limit
+        )
         print(f"[info] Loaded {len(thucnews_docs)} THUCNews docs for training")
 
     # Multi-domain JSONL (extractive, 95.8%)
@@ -800,7 +854,9 @@ def main() -> None:
             else:
                 dropped += 1
         ratio = kept_kw / max(total_kw, 1)
-        print(f"[info] {name}: keywords {kept_kw}/{total_kw} kept ({ratio:.1%}), {dropped} docs dropped")
+        print(
+            f"[info] {name}: keywords {kept_kw}/{total_kw} kept ({ratio:.1%}), {dropped} docs dropped"
+        )
         return filtered
 
     shencecup_docs = _filter_extractive(shencecup_docs, "ShenCe train")
@@ -811,7 +867,9 @@ def main() -> None:
     train_docs = shencecup_docs + thucnews_docs + md_docs
     random.shuffle(train_docs)
     dev_docs = all_eval_sets[args.dev_dataset]
-    print(f"[info] Total train docs: {len(train_docs)} (ShenCe={len(shencecup_docs)}, THUCNews={len(thucnews_docs)}, MD={len(md_docs)})")
+    print(
+        f"[info] Total train docs: {len(train_docs)} (ShenCe={len(shencecup_docs)}, THUCNews={len(thucnews_docs)}, MD={len(md_docs)})"
+    )
     print(f"[info] Dev docs: {len(dev_docs)}")
 
     train_examples = build_bio_examples_cached(
@@ -913,7 +971,10 @@ def main() -> None:
                 start_epoch = ckpt["epoch"] + 1
             if "train_log" in ckpt:
                 train_log = ckpt["train_log"]
-            print(f"[info] Resumed at epoch {start_epoch}, best_metric={best_metric:.4f}", flush=True)
+            print(
+                f"[info] Resumed at epoch {start_epoch}, best_metric={best_metric:.4f}",
+                flush=True,
+            )
         else:
             print(f"[warn] Resume path {resume_path} not found, starting from scratch")
 
@@ -947,7 +1008,10 @@ def main() -> None:
             optimizer.step()
             epoch_losses.append(float(loss.item()))
             if (batch_idx + 1) % 50 == 0 or batch_idx == 0:
-                print(f"  epoch {epoch} batch {batch_idx+1}/{num_train_batches} loss={loss.item():.2f} seq_len={input_ids.shape[1]}", flush=True)
+                print(
+                    f"  epoch {epoch} batch {batch_idx + 1}/{num_train_batches} loss={loss.item():.2f} seq_len={input_ids.shape[1]}",
+                    flush=True,
+                )
 
         print(f"  epoch {epoch} training done, starting eval...", flush=True)
         # Span-level dev evaluation
@@ -1027,7 +1091,9 @@ def main() -> None:
         else:
             patience_counter += 1
             if patience_counter >= args.early_stop_patience:
-                print(f"Early stopping at epoch {epoch} (patience={args.early_stop_patience})")
+                print(
+                    f"Early stopping at epoch {epoch} (patience={args.early_stop_patience})"
+                )
                 break
 
     report = {

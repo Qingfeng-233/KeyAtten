@@ -2,8 +2,8 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 type: software
 title: "KeyAtten: Attention-based Keyword Extraction"
-version: 0.2.0
-date-released: 2026-04-07
+version: 0.3.0
+date-released: 2026-05-27
 license: MIT
 url: "https://github.com/Qingfeng-233/KeyAtten"
 repository-code: "https://github.com/Qingfeng-233/KeyAtten"

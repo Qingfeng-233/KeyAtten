@@ -23,6 +23,7 @@ Usage:
   python train_qk_lora.py --disable-csl --md-max-keywords 6
   python train_qk_lora.py --smoke   # quick sanity check
 """
+
 from __future__ import annotations
 
 import argparse
@@ -35,7 +36,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
@@ -45,11 +45,16 @@ from transformers import AutoModel, AutoTokenizer, get_linear_schedule_with_warm
 try:
     from peft import LoraConfig, TaskType, get_peft_model
 except ImportError as _exc:
-    raise RuntimeError("peft is required. Install with: pip install peft>=0.10.0") from _exc
+    raise RuntimeError(
+        "peft is required. Install with: pip install peft>=0.10.0"
+    ) from _exc
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MODELS_ROOT = PROJECT_ROOT / "models"
 
+from keyatten.candidates import build_candidates, segment_text
+from keyatten.candidates.bio_mining import find_candidate_occurrences
+from keyatten.scoring import DEFAULT_ZH_CAUSAL_INSTRUCTION_PREFIX
 from benchmark.keyword_bench.data import (
     Document,
     load_csl_split,
@@ -57,9 +62,6 @@ from benchmark.keyword_bench.data import (
     load_shencecup_labeled,
 )
 from benchmark.keyword_bench.metrics import evaluate_predictions
-from keyatten.candidates import build_candidates, segment_text
-from keyatten.candidates.bio_mining import find_candidate_occurrences
-from keyatten.scoring import DEFAULT_ZH_CAUSAL_INSTRUCTION_PREFIX
 
 DEFAULT_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 DEFAULT_LAYER = "auto"
@@ -80,7 +82,9 @@ def parse_args() -> argparse.Namespace:
         help="attention layer index for QK scoring, or 'auto' for the recommended middle-upper layer",
     )
     p.add_argument("--device", default="cuda")
-    p.add_argument("--output-dir", default=None, help="output directory (default: auto-generated)")
+    p.add_argument(
+        "--output-dir", default=None, help="output directory (default: auto-generated)"
+    )
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--batch-size", type=int, default=6)
     p.add_argument("--lr", type=float, default=1e-4)
@@ -88,22 +92,67 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lora-alpha", type=int, default=16)
     p.add_argument("--lora-dropout", type=float, default=0.1)
     p.add_argument("--patience", type=int, default=5, help="early stopping patience")
-    p.add_argument("--max-length", type=int, default=512, help="max token length per document")
+    p.add_argument(
+        "--max-length", type=int, default=512, help="max token length per document"
+    )
     p.add_argument("--warmup-steps", type=int, default=100)
     p.add_argument("--top-k", type=int, default=10, help="top-k for dev evaluation")
     p.add_argument("--train-limit", type=int, default=None)
     p.add_argument("--dev-limit", type=int, default=None)
     p.add_argument("--test-limit", type=int, default=None)
-    p.add_argument("--shence-train-limit", type=int, default=None, help="optional cap for ShenCe training docs after split")
-    p.add_argument("--shence-dev-limit", type=int, default=None, help="optional cap for ShenCe dev docs after split")
-    p.add_argument("--shence-test-limit", type=int, default=None, help="optional cap for ShenCe held-out test docs after split")
-    p.add_argument("--shence-test-pool-size", type=int, default=None, help="override held-out ShenCe pool size before train/dev/test split")
-    p.add_argument("--split-seed", type=int, default=42, help="random seed for the ShenCe and multi-domain splits")
-    p.add_argument("--md-max-keywords", type=int, default=4, help="cap keywords per multi-domain doc (0=no cap)")
-    p.add_argument("--disable-csl", action="store_true", help="skip CSL train/test data entirely")
-    p.add_argument("--disable-multi-domain", action="store_true", help="skip optional multi-domain training data even if present")
-    p.add_argument("--smoke", action="store_true", help="quick sanity check with small data")
-    p.add_argument("--bio-candidate-checkpoint", type=str, default=None, help="optional BIO checkpoint for candidate generation")
+    p.add_argument(
+        "--shence-train-limit",
+        type=int,
+        default=None,
+        help="optional cap for ShenCe training docs after split",
+    )
+    p.add_argument(
+        "--shence-dev-limit",
+        type=int,
+        default=None,
+        help="optional cap for ShenCe dev docs after split",
+    )
+    p.add_argument(
+        "--shence-test-limit",
+        type=int,
+        default=None,
+        help="optional cap for ShenCe held-out test docs after split",
+    )
+    p.add_argument(
+        "--shence-test-pool-size",
+        type=int,
+        default=None,
+        help="override held-out ShenCe pool size before train/dev/test split",
+    )
+    p.add_argument(
+        "--split-seed",
+        type=int,
+        default=42,
+        help="random seed for the ShenCe and multi-domain splits",
+    )
+    p.add_argument(
+        "--md-max-keywords",
+        type=int,
+        default=4,
+        help="cap keywords per multi-domain doc (0=no cap)",
+    )
+    p.add_argument(
+        "--disable-csl", action="store_true", help="skip CSL train/test data entirely"
+    )
+    p.add_argument(
+        "--disable-multi-domain",
+        action="store_true",
+        help="skip optional multi-domain training data even if present",
+    )
+    p.add_argument(
+        "--smoke", action="store_true", help="quick sanity check with small data"
+    )
+    p.add_argument(
+        "--bio-candidate-checkpoint",
+        type=str,
+        default=None,
+        help="optional BIO checkpoint for candidate generation",
+    )
     p.add_argument(
         "--training-target",
         choices=("token", "candidate"),
@@ -123,8 +172,17 @@ def parse_args() -> argparse.Namespace:
         choices=("balanced", "clean", "high_recall"),
         default="balanced",
     )
-    p.add_argument("--bio-candidate-cache", type=str, default=None, help="optional JSONL cache for BIO candidates")
-    p.add_argument("--write-bio-candidate-cache", action="store_true", help="write missing BIO candidates to cache")
+    p.add_argument(
+        "--bio-candidate-cache",
+        type=str,
+        default=None,
+        help="optional JSONL cache for BIO candidates",
+    )
+    p.add_argument(
+        "--write-bio-candidate-cache",
+        action="store_true",
+        help="write missing BIO candidates to cache",
+    )
     p.add_argument(
         "--candidate-label-mode",
         choices=("strict", "soft"),
@@ -175,21 +233,21 @@ def _resolve_csl_paths(root_dir: str | None) -> tuple[Path, Path]:
 
     searched = ", ".join(str(path) for path in _iter_root_candidates(root_dir))
     raise FileNotFoundError(
-        "Could not locate CSL benchmark files. Searched roots: "
-        f"{searched}"
+        f"Could not locate CSL benchmark files. Searched roots: {searched}"
     )
 
 
 def _resolve_shence_root(root_dir: str | None) -> Path:
     for root in _iter_root_candidates(root_dir):
         raw_dir = root / "data" / "shencecup" / "raw"
-        if (raw_dir / "all_docs.txt").exists() and (raw_dir / "train_docs_keywords.txt").exists():
+        if (raw_dir / "all_docs.txt").exists() and (
+            raw_dir / "train_docs_keywords.txt"
+        ).exists():
             return root
 
     searched = ", ".join(str(path) for path in _iter_root_candidates(root_dir))
     raise FileNotFoundError(
-        "Could not locate ShenCeCup labeled data. Searched roots: "
-        f"{searched}"
+        f"Could not locate ShenCeCup labeled data. Searched roots: {searched}"
     )
 
 
@@ -257,7 +315,8 @@ def _supported_qk_layer_indices(model) -> List[int]:
     if not resolved_layers:
         return []
     return [
-        idx for idx, layer in enumerate(resolved_layers)
+        idx
+        for idx, layer in enumerate(resolved_layers)
         if _resolve_qk_attention_module(layer) is not None
     ]
 
@@ -277,10 +336,14 @@ def _resolve_layer_arg(layer_arg: str, model) -> tuple[int, int | None]:
 
     if layer_arg.strip().lower() == "auto":
         if supported_qk_layers:
-            raw_recommended = _recommended_layer_index(layer_count if layer_count is not None else len(supported_qk_layers))
+            raw_recommended = _recommended_layer_index(
+                layer_count if layer_count is not None else len(supported_qk_layers)
+            )
             if raw_recommended is None:
                 return supported_qk_layers[-1], layer_count
-            recommended = min(supported_qk_layers, key=lambda idx: (abs(idx - raw_recommended), -idx))
+            recommended = min(
+                supported_qk_layers, key=lambda idx: (abs(idx - raw_recommended), -idx)
+            )
             return recommended, layer_count
         recommended = _recommended_layer_index(layer_count)
         if recommended is None:
@@ -293,7 +356,9 @@ def _resolve_layer_arg(layer_arg: str, model) -> tuple[int, int | None]:
     if layer_count is not None and resolved < 0:
         resolved = layer_count + resolved
     if layer_count is not None and (resolved < 0 or resolved >= layer_count):
-        raise ValueError(f"Layer index {layer_arg} is out of range for {layer_count} layers.")
+        raise ValueError(
+            f"Layer index {layer_arg} is out of range for {layer_count} layers."
+        )
     if supported_qk_layers and resolved not in supported_qk_layers:
         supported_desc = ", ".join(str(idx) for idx in supported_qk_layers)
         raise ValueError(
@@ -310,8 +375,12 @@ def _gpu_memory_snapshot(device: str) -> dict:
             "peak_memory_reserved_gb": None,
         }
     return {
-        "peak_memory_allocated_gb": round(torch.cuda.max_memory_allocated() / (1024 ** 3), 4),
-        "peak_memory_reserved_gb": round(torch.cuda.max_memory_reserved() / (1024 ** 3), 4),
+        "peak_memory_allocated_gb": round(
+            torch.cuda.max_memory_allocated() / (1024**3), 4
+        ),
+        "peak_memory_reserved_gb": round(
+            torch.cuda.max_memory_reserved() / (1024**3), 4
+        ),
     }
 
 
@@ -353,8 +422,7 @@ def tokenize_and_label(
     attention_mask: List[int] = encoding["attention_mask"]
 
     kw_spans_in_full = [
-        (s + prefix_len, e + prefix_len)
-        for s, e in _keyword_char_spans(text, keywords)
+        (s + prefix_len, e + prefix_len) for s, e in _keyword_char_spans(text, keywords)
     ]
 
     seq_len = len(input_ids)
@@ -390,12 +458,13 @@ def _extract_bio_candidates(
     use_explicit = bio_candidate_mode == "explicit"
     if bio_candidate_mode == "auto":
         use_explicit = (
-            bio_candidate_max_spans is not None
-            or bio_candidate_b_threshold is not None
+            bio_candidate_max_spans is not None or bio_candidate_b_threshold is not None
         )
     if use_explicit:
         max_spans = 50 if bio_candidate_max_spans is None else bio_candidate_max_spans
-        b_threshold = 0.15 if bio_candidate_b_threshold is None else bio_candidate_b_threshold
+        b_threshold = (
+            0.15 if bio_candidate_b_threshold is None else bio_candidate_b_threshold
+        )
         return bio_extractor.extract_spans_relaxed(
             text,
             max_spans=max_spans,
@@ -408,7 +477,7 @@ def _extract_bio_candidates(
 
 
 def _doc_cache_key(doc: Document) -> str:
-    digest = hashlib.sha1(doc.text.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(doc.text.encode("utf-8")).hexdigest()
     return f"{doc.doc_id}:{digest}"
 
 
@@ -425,18 +494,25 @@ def _load_bio_candidate_cache(path: str | None) -> Dict[str, List[Tuple[str, flo
                 continue
             item = json.loads(line)
             candidates = item.get("candidates", [])
-            cache[item["key"]] = [(str(text), float(score)) for text, score in candidates]
+            cache[item["key"]] = [
+                (str(text), float(score)) for text, score in candidates
+            ]
     return cache
 
 
-def _write_bio_candidate_cache(path: str | None, cache: Dict[str, List[Tuple[str, float]]]) -> None:
+def _write_bio_candidate_cache(
+    path: str | None, cache: Dict[str, List[Tuple[str, float]]]
+) -> None:
     if not path:
         return
     cache_path = Path(path)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     with cache_path.open("w", encoding="utf-8") as handle:
         for key, candidates in sorted(cache.items()):
-            handle.write(json.dumps({"key": key, "candidates": candidates}, ensure_ascii=False) + "\n")
+            handle.write(
+                json.dumps({"key": key, "candidates": candidates}, ensure_ascii=False)
+                + "\n"
+            )
 
 
 def _candidate_label(candidate_text: str, gold_texts: set[str], mode: str) -> float:
@@ -505,7 +581,9 @@ def build_candidate_supervision(
         seen_texts.add(normalized_text)
         token_spans: List[Tuple[int, int]] = []
         for char_start, char_end in find_candidate_occurrences(text, normalized_text):
-            token_span = _char_span_to_token_span(offset_mapping, prefix_len, char_start, char_end)
+            token_span = _char_span_to_token_span(
+                offset_mapping, prefix_len, char_start, char_end
+            )
             if token_span is not None:
                 token_spans.append(token_span)
         if not token_spans:
@@ -513,7 +591,9 @@ def build_candidate_supervision(
         candidate_specs.append(
             {
                 "text": normalized_text,
-                "label": _candidate_label(normalized_text, gold_texts, candidate_label_mode),
+                "label": _candidate_label(
+                    normalized_text, gold_texts, candidate_label_mode
+                ),
                 "bio_score": float(bio_score),
                 "token_spans": token_spans,
             }
@@ -541,14 +621,26 @@ class TokenDataset(Dataset):
     ) -> None:
         self.items: List[dict] = []
         for index, doc in enumerate(docs, start=1):
-            item = tokenize_and_label(doc.text, doc.keywords, tokenizer, instruction_prefix, max_length)
+            item = tokenize_and_label(
+                doc.text, doc.keywords, tokenizer, instruction_prefix, max_length
+            )
             item["doc"] = doc
             if training_target == "candidate":
                 if bio_extractor is None:
-                    raise ValueError("Candidate-level training requires --bio-candidate-checkpoint.")
+                    raise ValueError(
+                        "Candidate-level training requires --bio-candidate-checkpoint."
+                    )
                 cache_key = _doc_cache_key(doc)
-                cache_entry = bio_candidate_cache.get(cache_key) if bio_candidate_cache is not None else None
-                if cache_entry is None and write_bio_candidate_cache and bio_candidate_cache is not None:
+                cache_entry = (
+                    bio_candidate_cache.get(cache_key)
+                    if bio_candidate_cache is not None
+                    else None
+                )
+                if (
+                    cache_entry is None
+                    and write_bio_candidate_cache
+                    and bio_candidate_cache is not None
+                ):
                     cache_entry = _extract_bio_candidates(
                         bio_extractor,
                         doc.text,
@@ -618,7 +710,9 @@ def compute_qk_scores(
 
     resolved_layers = _resolve_transformer_layers(model)
     if not resolved_layers:
-        raise AttributeError("Could not resolve transformer layers from model for QK scoring.")
+        raise AttributeError(
+            "Could not resolve transformer layers from model for QK scoring."
+        )
     target_layer = _resolve_qk_attention_module(resolved_layers[layer_idx])
     if target_layer is None:
         raise AttributeError(
@@ -635,7 +729,9 @@ def compute_qk_scores(
     hk = target_layer.k_proj.register_forward_hook(k_hook)
 
     try:
-        model(input_ids=input_ids, attention_mask=attention_mask, output_attentions=False)
+        model(
+            input_ids=input_ids, attention_mask=attention_mask, output_attentions=False
+        )
     finally:
         hq.remove()
         hk.remove()
@@ -655,7 +751,7 @@ def compute_qk_scores(
 
     eos_idx = attention_mask.sum(dim=1) - 1
     Q_eos = Q[torch.arange(batch_size), :, eos_idx, :].unsqueeze(2)
-    scale = head_dim ** 0.5
+    scale = head_dim**0.5
     scores = (Q_eos * K).sum(dim=-1) / scale
     scores = scores.mean(dim=1)
 
@@ -696,7 +792,10 @@ def score_candidates_with_qk(
         ]
     else:
         words, pos_tags = segment_text(doc.text, language="zh")
-        candidates = [candidate.text for candidate in build_candidates(words, pos_tags, language="zh")]
+        candidates = [
+            candidate.text
+            for candidate in build_candidates(words, pos_tags, language="zh")
+        ]
     if not candidates:
         return []
 
@@ -739,7 +838,11 @@ def score_candidates_with_qk(
             continue
         best_score = None
         for char_start, char_end in spans:
-            cand_scores = [char_to_score[c] for c in range(char_start, char_end) if c in char_to_score]
+            cand_scores = [
+                char_to_score[c]
+                for c in range(char_start, char_end)
+                if c in char_to_score
+            ]
             score = sum(cand_scores) / len(cand_scores) if cand_scores else 0.0
             if best_score is None or score > best_score:
                 best_score = score
@@ -769,8 +872,14 @@ def evaluate_f1_with_qk(
     golds = []
     for doc in docs:
         pred = score_candidates_with_qk(
-            doc, tokenizer, model, device,
-            instruction_prefix, max_length, layer_idx, top_k,
+            doc,
+            tokenizer,
+            model,
+            device,
+            instruction_prefix,
+            max_length,
+            layer_idx,
+            top_k,
             bio_extractor=bio_extractor,
             bio_candidate_mode=bio_candidate_mode,
             bio_candidate_max_spans=bio_candidate_max_spans,
@@ -801,8 +910,12 @@ def compute_candidate_bce_loss(
             if not occurrence_scores:
                 continue
             candidate_score = torch.stack(occurrence_scores).max()
-            label = torch.tensor([candidate["label"]], dtype=torch.float32, device=scores.device)
-            candidate_losses.append(criterion(candidate_score.unsqueeze(0), label).mean())
+            label = torch.tensor(
+                [candidate["label"]], dtype=torch.float32, device=scores.device
+            )
+            candidate_losses.append(
+                criterion(candidate_score.unsqueeze(0), label).mean()
+            )
     if not candidate_losses:
         return None
     return torch.stack(candidate_losses).mean()
@@ -815,7 +928,11 @@ def main() -> None:
     args = parse_args()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    output_dir = Path(args.output_dir) if args.output_dir else MODELS_ROOT / "qk_lora" / f"run_{timestamp}"
+    output_dir = (
+        Path(args.output_dir)
+        if args.output_dir
+        else MODELS_ROOT / "qk_lora" / f"run_{timestamp}"
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"[info] Output dir: {output_dir}")
 
@@ -847,7 +964,7 @@ def main() -> None:
     if args.training_target == "candidate":
         print("[info] Method: Candidate-level QK BCE on BIO candidate spans")
     else:
-        print(f"[info] Method: Contrastive QK Learning (Q[EOS]·K[i] BCE)")
+        print("[info] Method: Contrastive QK Learning (Q[EOS]·K[i] BCE)")
 
     # ── Load data ──
 
@@ -867,11 +984,15 @@ def main() -> None:
     shence_root = _resolve_shence_root(args.root_dir)
     shence_all = load_shencecup_labeled(shence_root)
     _split_rng.shuffle(shence_all)
-    shence_test_size = args.shence_test_pool_size if args.shence_test_pool_size is not None else min(200, len(shence_all) // 5)
+    shence_test_size = (
+        args.shence_test_pool_size
+        if args.shence_test_pool_size is not None
+        else min(200, len(shence_all) // 5)
+    )
     shence_test = shence_all[:shence_test_size]
     shence_train = shence_all[shence_test_size:]
-    dev_docs = shence_test[:shence_test_size // 2]
-    shence_test_final = shence_test[shence_test_size // 2:]
+    dev_docs = shence_test[: shence_test_size // 2]
+    shence_test_final = shence_test[shence_test_size // 2 :]
 
     if args.shence_train_limit is not None:
         shence_train = shence_train[: args.shence_train_limit]
@@ -880,7 +1001,9 @@ def main() -> None:
     if shence_test_limit is not None:
         shence_test_final = shence_test_final[:shence_test_limit]
 
-    multi_domain_path = None if args.disable_multi_domain else _resolve_multi_domain_path(args.root_dir)
+    multi_domain_path = (
+        None if args.disable_multi_domain else _resolve_multi_domain_path(args.root_dir)
+    )
     if multi_domain_path is not None and multi_domain_path.exists():
         print("[info] Loading multi-domain data...")
         md_all = load_multi_domain_jsonl(multi_domain_path)
@@ -908,7 +1031,9 @@ def main() -> None:
             else:
                 dropped_docs += 1
         kept_ratio = 0.0 if total_kw == 0 else kept_kw / total_kw
-        print(f"[info] {name}: keywords {kept_kw}/{total_kw} kept ({kept_ratio:.1%}), {dropped_docs} docs dropped")
+        print(
+            f"[info] {name}: keywords {kept_kw}/{total_kw} kept ({kept_ratio:.1%}), {dropped_docs} docs dropped"
+        )
         return filtered
 
     csl_train = _filter_extractive(csl_train, "CSL train")
@@ -922,31 +1047,43 @@ def main() -> None:
         for doc in md_train:
             if len(doc.keywords) > args.md_max_keywords:
                 d = copy(doc)
-                d.keywords = doc.keywords[:args.md_max_keywords]
+                d.keywords = doc.keywords[: args.md_max_keywords]
                 capped_docs.append(d)
                 capped += 1
             else:
                 capped_docs.append(doc)
         md_train = capped_docs
-        print(f"[info] MD train: capped {capped}/{len(md_train)} docs to max {args.md_max_keywords} keywords")
+        print(
+            f"[info] MD train: capped {capped}/{len(md_train)} docs to max {args.md_max_keywords} keywords"
+        )
 
     train_docs = csl_train + shence_train + md_train
     _split_rng.shuffle(train_docs)
     if train_limit is not None:
         train_docs = train_docs[:train_limit]
-    print(f"[info] === Data Split (seed=42, extractive-filtered) ===")
-    print(f"[info] Train: {len(train_docs)} (CSL={len(csl_train)}, ShenCe={len(shence_train)}, MD={len(md_train)})")
+    print("[info] === Data Split (seed=42, extractive-filtered) ===")
+    print(
+        f"[info] Train: {len(train_docs)} (CSL={len(csl_train)}, ShenCe={len(shence_train)}, MD={len(md_train)})"
+    )
     print(f"[info] Dev (ShenCe): {len(dev_docs)}")
-    print(f"[info] Test: ShenCe={len(shence_test_final)}, MD={len(md_test)}, CSL={len(csl_test)}")
+    print(
+        f"[info] Test: ShenCe={len(shence_test_final)}, MD={len(md_test)}, CSL={len(csl_test)}"
+    )
 
     # ── Tokenize & build dataset ──
 
     print(f"[info] Loading tokenizer from {args.model}...")
     try:
-        tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.model, use_fast=True, trust_remote_code=True
+        )
     except Exception as exc:
-        print(f"[warn] Failed to load fast tokenizer ({exc}), falling back to slow tokenizer")
-        tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False, trust_remote_code=True)
+        print(
+            f"[warn] Failed to load fast tokenizer ({exc}), falling back to slow tokenizer"
+        )
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.model, use_fast=False, trust_remote_code=True
+        )
 
     print("[info] Pre-tokenizing training data...")
     bio_candidate_cache = _load_bio_candidate_cache(args.bio_candidate_cache)
@@ -969,7 +1106,9 @@ def main() -> None:
     )
     if args.write_bio_candidate_cache and args.bio_candidate_cache:
         _write_bio_candidate_cache(args.bio_candidate_cache, bio_candidate_cache)
-        print(f"[info] BIO candidate cache written: {args.bio_candidate_cache} ({len(bio_candidate_cache)} docs)")
+        print(
+            f"[info] BIO candidate cache written: {args.bio_candidate_cache} ({len(bio_candidate_cache)} docs)"
+        )
 
     if args.training_target == "candidate":
         pos_count = sum(
@@ -986,8 +1125,15 @@ def main() -> None:
         )
         print(f"[info] Candidate labels: {pos_count} pos / {neg_count} neg", end="")
     else:
-        pos_count = sum(1 for item in train_dataset.items for lbl in item["labels"] if lbl > 0.5)
-        neg_count = sum(1 for item in train_dataset.items for lbl in item["labels"] if 0.0 <= lbl <= 0.5)
+        pos_count = sum(
+            1 for item in train_dataset.items for lbl in item["labels"] if lbl > 0.5
+        )
+        neg_count = sum(
+            1
+            for item in train_dataset.items
+            for lbl in item["labels"]
+            if 0.0 <= lbl <= 0.5
+        )
         print(f"[info] Token labels: {pos_count} pos / {neg_count} neg", end="")
     pos_weight = neg_count / max(pos_count, 1)
     print(f" → pos_weight={pos_weight:.2f}")
@@ -1009,7 +1155,8 @@ def main() -> None:
 
     print(f"[info] Loading base model from {args.model}...")
     base_model = AutoModel.from_pretrained(
-        args.model, trust_remote_code=True,
+        args.model,
+        trust_remote_code=True,
         torch_dtype=amp_dtype if use_amp else None,
     )
     layer_idx, layer_count = _resolve_layer_arg(args.layer, base_model)
@@ -1030,18 +1177,28 @@ def main() -> None:
     lora_model.print_trainable_parameters()
     lora_model.to(device)
     total_params = sum(param.numel() for param in lora_model.parameters())
-    trainable_params = sum(param.numel() for param in lora_model.parameters() if param.requires_grad)
+    trainable_params = sum(
+        param.numel() for param in lora_model.parameters() if param.requires_grad
+    )
     print(f"[info] Parameters: trainable={trainable_params:,} total={total_params:,}")
 
-    optimizer = torch.optim.AdamW(lora_model.parameters(), lr=args.lr, weight_decay=0.01)
+    optimizer = torch.optim.AdamW(
+        lora_model.parameters(), lr=args.lr, weight_decay=0.01
+    )
     total_steps = len(train_loader) * args.epochs
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=total_steps)
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=total_steps
+    )
 
-    criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight], device=device), reduction="none")
+    criterion = nn.BCEWithLogitsLoss(
+        pos_weight=torch.tensor([pos_weight], device=device), reduction="none"
+    )
     if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
         scaler = torch.amp.GradScaler(enabled=use_amp and amp_dtype == torch.float16)
     else:
-        scaler = torch.cuda.amp.GradScaler(enabled=use_amp and amp_dtype == torch.float16)
+        scaler = torch.cuda.amp.GradScaler(
+            enabled=use_amp and amp_dtype == torch.float16
+        )
 
     # ── Resume from checkpoint ──
 
@@ -1063,7 +1220,9 @@ def main() -> None:
         lora_model.load_adapter(str(latest_adapter_dir), adapter_name="default")
         optimizer.load_state_dict(ckpt["optimizer"])
         scheduler.load_state_dict(ckpt["scheduler"])
-        tqdm.write(f"[info] Resumed from epoch {ckpt['epoch']}, best F1@10={best_f1:.4f}")
+        tqdm.write(
+            f"[info] Resumed from epoch {ckpt['epoch']}, best F1@10={best_f1:.4f}"
+        )
 
     # ── Training loop ──
 
@@ -1076,15 +1235,24 @@ def main() -> None:
         if device == "cuda" and torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
 
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}", unit="batch",
-                    ncols=100, ascii=True, leave=False, mininterval=2.0)
+        pbar = tqdm(
+            train_loader,
+            desc=f"Epoch {epoch}/{args.epochs}",
+            unit="batch",
+            ncols=100,
+            ascii=True,
+            leave=False,
+            mininterval=2.0,
+        )
         for batch in pbar:
             input_ids = batch["input_ids"].to(device, non_blocking=True)
             attention_mask = batch["attention_mask"].to(device, non_blocking=True)
             labels = batch["labels"].to(device, non_blocking=True)
 
             with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
-                scores = compute_qk_scores(lora_model, input_ids, attention_mask, layer_idx)
+                scores = compute_qk_scores(
+                    lora_model, input_ids, attention_mask, layer_idx
+                )
                 if args.training_target == "candidate":
                     loss = compute_candidate_bce_loss(
                         scores,
@@ -1114,11 +1282,19 @@ def main() -> None:
             pbar.set_postfix(loss=f"{loss.item():.4f}", avg=f"{total_loss / steps:.4f}")
 
         avg_loss = total_loss / max(steps, 1)
-        tqdm.write(f"[epoch {epoch}/{args.epochs}] loss={avg_loss:.4f} | evaluating dev...")
+        tqdm.write(
+            f"[epoch {epoch}/{args.epochs}] loss={avg_loss:.4f} | evaluating dev..."
+        )
 
         dev_metrics = evaluate_f1_with_qk(
-            lora_model, tokenizer, dev_docs, device,
-            INSTRUCTION_PREFIX, args.max_length, layer_idx, args.top_k,
+            lora_model,
+            tokenizer,
+            dev_docs,
+            device,
+            INSTRUCTION_PREFIX,
+            args.max_length,
+            layer_idx,
+            args.top_k,
             bio_extractor=bio_extractor,
             bio_candidate_mode=args.bio_candidate_mode,
             bio_candidate_max_spans=args.bio_candidate_max_spans,
@@ -1151,24 +1327,31 @@ def main() -> None:
             adapter_dir = output_dir / "best_adapter"
             adapter_dir.mkdir(exist_ok=True)
             lora_model.save_pretrained(str(adapter_dir))
-            tqdm.write(f"[epoch {epoch}] *** New best F1@10={best_f1:.4f} — adapter saved ***")
+            tqdm.write(
+                f"[epoch {epoch}] *** New best F1@10={best_f1:.4f} — adapter saved ***"
+            )
         else:
             patience_counter += 1
             if patience_counter >= args.patience:
-                tqdm.write(f"[info] Early stopping at epoch {epoch} (patience={args.patience})")
+                tqdm.write(
+                    f"[info] Early stopping at epoch {epoch} (patience={args.patience})"
+                )
                 break
 
         latest_adapter_dir.mkdir(exist_ok=True)
         lora_model.save_pretrained(str(latest_adapter_dir))
-        torch.save({
-            "epoch": epoch,
-            "best_f1": best_f1,
-            "best_epoch": best_epoch,
-            "patience_counter": patience_counter,
-            "training_log": training_log,
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
-        }, str(checkpoint_path))
+        torch.save(
+            {
+                "epoch": epoch,
+                "best_f1": best_f1,
+                "best_epoch": best_epoch,
+                "patience_counter": patience_counter,
+                "training_log": training_log,
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+            },
+            str(checkpoint_path),
+        )
 
     # ── Final evaluation ──
 
@@ -1177,7 +1360,9 @@ def main() -> None:
     total_training_seconds = round(time.perf_counter() - training_start, 2)
 
     if (output_dir / "best_adapter").exists():
-        lora_model.load_adapter(str(output_dir / "best_adapter"), adapter_name="default")
+        lora_model.load_adapter(
+            str(output_dir / "best_adapter"), adapter_name="default"
+        )
 
     test_sets = {}
     if shence_test_final:
@@ -1190,8 +1375,14 @@ def main() -> None:
     all_test_metrics = {}
     for ts_name, ts_docs in test_sets.items():
         metrics = evaluate_f1_with_qk(
-            lora_model, tokenizer, ts_docs, device,
-            INSTRUCTION_PREFIX, args.max_length, layer_idx, args.top_k,
+            lora_model,
+            tokenizer,
+            ts_docs,
+            device,
+            INSTRUCTION_PREFIX,
+            args.max_length,
+            layer_idx,
+            args.top_k,
             bio_extractor=bio_extractor,
             bio_candidate_mode=args.bio_candidate_mode,
             bio_candidate_max_spans=args.bio_candidate_max_spans,
@@ -1200,7 +1391,9 @@ def main() -> None:
         )
         f1_10 = metrics.get("f1@10", 0.0)
         f1_5 = metrics.get("f1@5", 0.0)
-        print(f"[test/{ts_name}] F1@5={f1_5:.4f}  F1@10={f1_10:.4f}  ({len(ts_docs)} docs)")
+        print(
+            f"[test/{ts_name}] F1@5={f1_5:.4f}  F1@10={f1_10:.4f}  ({len(ts_docs)} docs)"
+        )
         all_test_metrics[ts_name] = metrics
 
     final_eval = {
@@ -1232,12 +1425,16 @@ def main() -> None:
             "max_length": args.max_length,
             "pos_weight": pos_weight,
             "candidate_label_mode": args.candidate_label_mode,
-            "training_method": "candidate_qk_bce" if args.training_target == "candidate" else "contrastive_qk",
+            "training_method": "candidate_qk_bce"
+            if args.training_target == "candidate"
+            else "contrastive_qk",
         },
         "model_stats": {
             "trainable_params": trainable_params,
             "total_params": total_params,
-            "best_epoch_log": next((item for item in training_log if item["epoch"] == best_epoch), None),
+            "best_epoch_log": next(
+                (item for item in training_log if item["epoch"] == best_epoch), None
+            ),
         },
     }
     (output_dir / "final_eval.json").write_text(

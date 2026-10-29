@@ -653,6 +653,83 @@ def attention_word_scores_with_raw(
     return scores_by_method, raw_attention_map, valid_word_ids
 
 
+def attention_dual_layer_maps(
+    words: Sequence[str],
+    model_bundle: dict,
+    merge_layer_index: int,
+    score_layer_index: int,
+    *,
+    pos_tags: Sequence[str] | None = None,
+    language: str = "zh",
+) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray], list[int | None]]:
+    """Single forward: shallow attention for merge, deep attention for word scores.
+
+    Returns:
+        merge_attention_map: (T, T) from merge_layer_index
+        score_attention_map: (T, T) from score_layer_index (for rescore after merge)
+        scores_by_method: word scores from score_layer_index on *original* words
+        word_ids: token-to-word alignment for the same encoding
+    """
+    if model_bundle.get("backend") == "onnx":
+        raise ValueError(
+            "attention_dual_layer_maps requires torch backend (multi-layer attentions)."
+        )
+
+    tokenizer = model_bundle["tokenizer"]
+    model = model_bundle["model"]
+    device = model_bundle["device"]
+    max_length = int(model_bundle.get("max_length", 512))
+    is_causal = model_bundle.get("is_causal", False)
+
+    encoded = tokenizer(
+        [list(words)],
+        is_split_into_words=True,
+        padding=False,
+        truncation=True,
+        max_length=max_length,
+        return_tensors="pt",
+    )
+    word_ids = encoded.word_ids(batch_index=0)
+    encoded = {key: value.to(device) for key, value in encoded.items()}
+
+    with torch.inference_mode():
+        outputs = model(**encoded, output_attentions=True)
+
+    layer_count = len(outputs.attentions)
+    valid_token_count = int(encoded["attention_mask"][0].sum().item())
+    valid_word_ids = word_ids[:valid_token_count]
+
+    content_mask = None
+    if is_causal and pos_tags is not None:
+        content_mask = _build_content_mask(valid_word_ids, words, pos_tags, language)
+
+    resolved_merge = _resolve_layer_index(merge_layer_index, layer_count)
+    resolved_score = _resolve_layer_index(score_layer_index, layer_count)
+
+    merge_map = (
+        outputs.attentions[resolved_merge]
+        .mean(dim=1)[0][:valid_token_count, :valid_token_count]
+        .detach()
+        .cpu()
+        .numpy()
+    )
+    score_map = (
+        outputs.attentions[resolved_score]
+        .mean(dim=1)[0][:valid_token_count, :valid_token_count]
+        .detach()
+        .cpu()
+        .numpy()
+    )
+    scores_by_method = _scores_from_attention_map(
+        valid_word_ids,
+        score_map,
+        len(words),
+        is_causal=is_causal,
+        content_mask=content_mask,
+    )
+    return merge_map, score_map, scores_by_method, valid_word_ids
+
+
 def attention_token_scores(
     text: str,
     model_bundle: dict,
@@ -776,6 +853,7 @@ __all__ = [
     "ATTENTION_METHODS",
     "attention_word_scores",
     "attention_word_scores_with_raw",
+    "attention_dual_layer_maps",
     "attention_token_scores",
     "rescore_with_new_words",
     "batched_attention_word_scores",

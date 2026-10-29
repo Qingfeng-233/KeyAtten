@@ -9,14 +9,6 @@ from typing import TYPE_CHECKING, Sequence
 
 import numpy as np
 
-from ..scoring import (
-    ATTENTION_METHODS,
-    DEFAULT_ZH_CAUSAL_INSTRUCTION_PREFIX,
-    attention_token_scores,
-    attention_word_scores,
-    batched_attention_word_scores,
-    build_model_bundle,
-)
 from ..candidates import (
     Candidate,
     WordWeight,
@@ -28,7 +20,19 @@ from ..candidates import (
     segment_text,
     token_values_from_word_values,
 )
-from ..candidates.fusion import combine_word_scores, token_counter, word_scores_from_token_values
+from ..candidates.fusion import (
+    combine_word_scores,
+    token_counter,
+    word_scores_from_token_values,
+)
+from ..scoring import (
+    ATTENTION_METHODS,
+    DEFAULT_ZH_CAUSAL_INSTRUCTION_PREFIX,
+    attention_token_scores,
+    attention_word_scores,
+    batched_attention_word_scores,
+    build_model_bundle,
+)
 
 if TYPE_CHECKING:
     from .bio import BIOExtractor
@@ -47,7 +51,10 @@ class KeyAttenExtractor:
         device: str = "cpu",
         backend: str = "auto",
         onnx_path: str | None = None,
-        user_dict: str | Sequence[str] | dict[str, str | tuple[int | None, str | None]] | None = None,
+        user_dict: str
+        | Sequence[str]
+        | dict[str, str | tuple[int | None, str | None]]
+        | None = None,
         layer_index: int | None = None,
         layer_indices: list[int] | None = None,
         layer_weights: list[float] | None = None,
@@ -71,13 +78,19 @@ class KeyAttenExtractor:
             if layer_indices is None:
                 raise ValueError("layer_weights requires layer_indices.")
             if len(layer_weights) != len(layer_indices):
-                raise ValueError("layer_weights must have the same length as layer_indices.")
+                raise ValueError(
+                    "layer_weights must have the same length as layer_indices."
+                )
         if backend not in {"auto", "torch", "onnx"}:
             raise ValueError("backend must be one of {'auto', 'torch', 'onnx'}.")
         if backend == "onnx" and layer_indices is not None:
-            raise ValueError("ONNX backend currently supports only a single exported attention layer.")
+            raise ValueError(
+                "ONNX backend currently supports only a single exported attention layer."
+            )
         if candidate_scoring not in {"word", "token_span", "bio"}:
-            raise ValueError("candidate_scoring must be one of {'word', 'token_span', 'bio'}.")
+            raise ValueError(
+                "candidate_scoring must be one of {'word', 'token_span', 'bio'}."
+            )
         if candidate_scoring == "bio" and bio_model_path is None:
             raise ValueError("candidate_scoring='bio' requires bio_model_path.")
 
@@ -138,7 +151,9 @@ class KeyAttenExtractor:
                 self._write_keyword_cache(cache_path, result)
             return result
 
-        words, pos_tags, candidates, candidate_starts, candidate_ends, token_counts = self._prepare_document(text, pos_tags=pos_tags)
+        words, pos_tags, candidates, candidate_starts, candidate_ends, token_counts = (
+            self._prepare_document(text, pos_tags=pos_tags)
+        )
         if not candidates:
             if cache_path is not None:
                 self._write_keyword_cache(cache_path, [])
@@ -201,10 +216,16 @@ class KeyAttenExtractor:
             lookup = self._require_idf_lookup(idf_lookup)
             words, pos_tags = self._resolve_document_words(text)
             token_counts = dict(token_counter(words, pos_tags, language=self.language))
-            tfidf_word_scores = self._tfidf_word_scores(words, pos_tags, token_counts, lookup)
+            tfidf_word_scores = self._tfidf_word_scores(
+                words, pos_tags, token_counts, lookup
+            )
             word_offsets = locate_word_offsets(text, words)
-            tfidf_token_scores = token_values_from_word_values(token_offsets, word_offsets, tfidf_word_scores)
-            token_scores = combine_word_scores(token_scores, tfidf_token_scores, mode="product")
+            tfidf_token_scores = token_values_from_word_values(
+                token_offsets, word_offsets, tfidf_word_scores
+            )
+            token_scores = combine_word_scores(
+                token_scores, tfidf_token_scores, mode="product"
+            )
 
         # Score each BIO candidate by its token span overlap with attention scores
         scored: list[tuple[float, str]] = []
@@ -248,7 +269,9 @@ class KeyAttenExtractor:
         idf_lookup: dict[str, float] | None,
     ) -> list[str]:
         if not isinstance(text, str):
-            raise ValueError("candidate_scoring='token_span' requires raw string text input.")
+            raise ValueError(
+                "candidate_scoring='token_span' requires raw string text input."
+            )
 
         word_offsets = locate_word_offsets(text, words)
         candidate_spans = candidate_char_spans(candidates, word_offsets)
@@ -265,9 +288,15 @@ class KeyAttenExtractor:
         token_scores = token_method_scores[base_method]
         if method.endswith("_idf"):
             lookup = self._require_idf_lookup(idf_lookup)
-            tfidf_word_scores = self._tfidf_word_scores(words, pos_tags, token_counts, lookup)
-            tfidf_token_scores = token_values_from_word_values(token_offsets, word_offsets, tfidf_word_scores)
-            token_scores = combine_word_scores(token_scores, tfidf_token_scores, mode="product")
+            tfidf_word_scores = self._tfidf_word_scores(
+                words, pos_tags, token_counts, lookup
+            )
+            tfidf_token_scores = token_values_from_word_values(
+                token_offsets, word_offsets, tfidf_word_scores
+            )
+            token_scores = combine_word_scores(
+                token_scores, tfidf_token_scores, mode="product"
+            )
 
         return candidate_rank_from_token_scores(
             candidates,
@@ -356,73 +385,82 @@ class KeyAttenExtractor:
                     method=method,
                     top_k=top_k,
                     idf_lookup=idf_lookup,
-                    pos_tags=pos_tags_batch[index] if pos_tags_batch is not None else None,
+                    pos_tags=pos_tags_batch[index]
+                    if pos_tags_batch is not None
+                    else None,
                 )
                 for index, text in enumerate(texts)
             ]
 
-        prepared = [
-            self._prepare_document(
-                text,
-                pos_tags=pos_tags_batch[index] if pos_tags_batch is not None else None,
+        documents: list[dict] = []
+        cache_miss_indices: list[int] = []
+        for index, text in enumerate(texts):
+            pos_tags = pos_tags_batch[index] if pos_tags_batch is not None else None
+            document = self._load_or_build_word_document_cache(
+                text=text, pos_tags=pos_tags
             )
-            for index, text in enumerate(texts)
-        ]
-        batch_words = [item[0] for item in prepared]
-        batch_pos_tags_list = [item[1] for item in prepared]
-        effective_layer_indices = (
-            list(self.layer_indices)
-            if self.layer_indices is not None
-            else [self._resolve_effective_layer_index()]
-        )
-        per_doc_layer_scores = batched_attention_word_scores(
-            batch_words,
-            self._get_model_bundle(),
-            layer_indices=effective_layer_indices,
-            batch_pos_tags=batch_pos_tags_list,
-            language=self.language,
-            instruction_prefix=self._resolve_instruction_prefix(),
-        )
+            documents.append(document)
+            if document.get("_cache_miss"):
+                cache_miss_indices.append(index)
+
+        if cache_miss_indices:
+            miss_words = [documents[i]["words"] for i in cache_miss_indices]
+            miss_pos_tags = [documents[i]["pos_tags"] for i in cache_miss_indices]
+            effective_layer_indices = (
+                list(self.layer_indices)
+                if self.layer_indices is not None
+                else [self._resolve_effective_layer_index()]
+            )
+            per_doc_layer_scores = batched_attention_word_scores(
+                miss_words,
+                self._get_model_bundle(),
+                layer_indices=effective_layer_indices,
+                batch_pos_tags=miss_pos_tags,
+                language=self.language,
+                instruction_prefix=self._resolve_instruction_prefix(),
+            )
+            for batch_idx, doc_idx in enumerate(cache_miss_indices):
+                per_doc_scores = per_doc_layer_scores[batch_idx]
+                per_layer_scores = [
+                    per_doc_scores[li] for li in effective_layer_indices
+                ]
+                if len(per_layer_scores) == 1:
+                    scores_by_method = per_layer_scores[0]
+                else:
+                    scores_by_method = {
+                        method_name: np.average(
+                            np.stack(
+                                [scores[method_name] for scores in per_layer_scores],
+                                axis=0,
+                            ),
+                            axis=0,
+                            weights=self.layer_weights,
+                        )
+                        for method_name in per_layer_scores[0]
+                    }
+                documents[doc_idx]["scores_by_method"] = {
+                    method_name: np.asarray(scores, dtype=np.float32).tolist()
+                    for method_name, scores in scores_by_method.items()
+                }
+                cache_path = self._word_document_cache_path(
+                    text=texts[doc_idx],
+                    pos_tags=pos_tags_batch[doc_idx]
+                    if pos_tags_batch is not None
+                    else None,
+                )
+                if cache_path is not None:
+                    doc_to_write = {
+                        k: v
+                        for k, v in documents[doc_idx].items()
+                        if not k.startswith("_")
+                    }
+                    self._write_json_cache(cache_path, doc_to_write)
 
         results: list[list[str]] = []
-        base_method = method.removesuffix("_idf")
-        for (words, pos_tags, candidates, candidate_starts, candidate_ends, token_counts), per_doc_scores in zip(
-            prepared,
-            per_doc_layer_scores,
-        ):
-            if not candidates:
-                results.append([])
-                continue
-
-            per_layer_scores = [per_doc_scores[index] for index in effective_layer_indices]
-            if len(per_layer_scores) == 1:
-                scores_by_method = per_layer_scores[0]
-            else:
-                scores_by_method = {
-                    method_name: np.average(
-                        np.stack([scores[method_name] for scores in per_layer_scores], axis=0),
-                        axis=0,
-                        weights=self.layer_weights,
-                    )
-                    for method_name in per_layer_scores[0]
-                }
-
-            word_scores = scores_by_method[base_method]
-            if method.endswith("_idf"):
-                lookup = self._require_idf_lookup(idf_lookup)
-                tfidf_word_scores = self._tfidf_word_scores(words, pos_tags, token_counts, lookup)
-                word_scores = combine_word_scores(word_scores, tfidf_word_scores, mode="product")
-
+        for document in documents:
             results.append(
-                candidate_rank_from_word_scores(
-                    candidates,
-                    word_scores,
-                    top_k=top_k,
-                    dedup_nested=self._use_nested_dedup(top_k),
-                    token_counts=token_counts,
-                    words=words,
-                    candidate_starts=candidate_starts,
-                    candidate_ends=candidate_ends,
+                self._rank_from_document_dict(
+                    document, method=method, top_k=top_k, idf_lookup=idf_lookup
                 )
             )
         return results
@@ -431,11 +469,21 @@ class KeyAttenExtractor:
         self,
         text: str | Sequence[str],
         pos_tags: Sequence[str] | None = None,
-    ) -> tuple[list[str], list[str], list[Candidate], np.ndarray, np.ndarray, dict[str, float]]:
+    ) -> tuple[
+        list[str], list[str], list[Candidate], np.ndarray, np.ndarray, dict[str, float]
+    ]:
         words, pos_tags = self._resolve_document_words(text, pos_tags=pos_tags)
         candidates = build_candidates(words, pos_tags, language=self.language)
-        candidate_starts = np.fromiter((candidate.word_start for candidate in candidates), dtype=np.int32, count=len(candidates))
-        candidate_ends = np.fromiter((candidate.word_end for candidate in candidates), dtype=np.int32, count=len(candidates))
+        candidate_starts = np.fromiter(
+            (candidate.word_start for candidate in candidates),
+            dtype=np.int32,
+            count=len(candidates),
+        )
+        candidate_ends = np.fromiter(
+            (candidate.word_end for candidate in candidates),
+            dtype=np.int32,
+            count=len(candidates),
+        )
         counts = dict(token_counter(words, pos_tags, language=self.language))
         return words, pos_tags, candidates, candidate_starts, candidate_ends, counts
 
@@ -483,8 +531,12 @@ class KeyAttenExtractor:
         word_scores = scores_by_method[base_method]
         if method.endswith("_idf"):
             lookup = self._require_idf_lookup(idf_lookup)
-            tfidf_word_scores = self._tfidf_word_scores(words, pos_tags, token_counts, lookup)
-            word_scores = combine_word_scores(word_scores, tfidf_word_scores, mode="product")
+            tfidf_word_scores = self._tfidf_word_scores(
+                words, pos_tags, token_counts, lookup
+            )
+            word_scores = combine_word_scores(
+                word_scores, tfidf_word_scores, mode="product"
+            )
         return word_scores
 
     def _add_idf_document(
@@ -493,7 +545,9 @@ class KeyAttenExtractor:
         pos_tags: Sequence[str] | None = None,
     ) -> None:
         words, resolved_pos_tags = self._resolve_document_words(text, pos_tags=pos_tags)
-        tokens = set(token_counter(words, resolved_pos_tags, language=self.language).keys())
+        tokens = set(
+            token_counter(words, resolved_pos_tags, language=self.language).keys()
+        )
         self._idf_doc_count += 1
         self._idf_document_freq.update(tokens)
 
@@ -514,6 +568,41 @@ class KeyAttenExtractor:
         pos_tags: Sequence[str] | None,
     ) -> list[str]:
         document = self._load_or_build_word_document_cache(text=text, pos_tags=pos_tags)
+        if document.get("_cache_miss"):
+            words = [str(w) for w in document["words"]]
+            resolved_pos_tags = [str(t) for t in document["pos_tags"]]
+            scores_by_method = attention_word_scores(
+                words,
+                self._get_model_bundle(),
+                layer_index=self._resolve_effective_layer_index(),
+                layer_indices=self.layer_indices,
+                layer_weights=self.layer_weights,
+                pos_tags=resolved_pos_tags,
+                language=self.language,
+                instruction_prefix=self._resolve_instruction_prefix(),
+            )
+            document["scores_by_method"] = {
+                method_name: np.asarray(scores, dtype=np.float32).tolist()
+                for method_name, scores in scores_by_method.items()
+            }
+            cache_path = self._word_document_cache_path(text=text, pos_tags=pos_tags)
+            if cache_path is not None:
+                doc_to_write = {
+                    k: v for k, v in document.items() if not k.startswith("_")
+                }
+                self._write_json_cache(cache_path, doc_to_write)
+        return self._rank_from_document_dict(
+            document, method=method, top_k=top_k, idf_lookup=idf_lookup
+        )
+
+    def _rank_from_document_dict(
+        self,
+        document: dict,
+        *,
+        method: str,
+        top_k: int,
+        idf_lookup: dict[str, float] | None,
+    ) -> list[str]:
         candidates = [
             Candidate(
                 text=str(candidate["text"]),
@@ -527,7 +616,9 @@ class KeyAttenExtractor:
 
         words = [str(word) for word in document["words"]]
         resolved_pos_tags = [str(tag) for tag in document["pos_tags"]]
-        token_counts = {str(key): float(value) for key, value in document["token_counts"].items()}
+        token_counts = {
+            str(key): float(value) for key, value in document["token_counts"].items()
+        }
         scores_by_method = {
             str(name): np.asarray(values, dtype=np.float32)
             for name, values in document["scores_by_method"].items()
@@ -536,11 +627,23 @@ class KeyAttenExtractor:
         word_scores = scores_by_method[base_method]
         if method.endswith("_idf"):
             lookup = self._require_idf_lookup(idf_lookup)
-            tfidf_word_scores = self._tfidf_word_scores(words, resolved_pos_tags, token_counts, lookup)
-            word_scores = combine_word_scores(word_scores, tfidf_word_scores, mode="product")
+            tfidf_word_scores = self._tfidf_word_scores(
+                words, resolved_pos_tags, token_counts, lookup
+            )
+            word_scores = combine_word_scores(
+                word_scores, tfidf_word_scores, mode="product"
+            )
 
-        candidate_starts = np.fromiter((candidate.word_start for candidate in candidates), dtype=np.int32, count=len(candidates))
-        candidate_ends = np.fromiter((candidate.word_end for candidate in candidates), dtype=np.int32, count=len(candidates))
+        candidate_starts = np.fromiter(
+            (candidate.word_start for candidate in candidates),
+            dtype=np.int32,
+            count=len(candidates),
+        )
+        candidate_ends = np.fromiter(
+            (candidate.word_end for candidate in candidates),
+            dtype=np.int32,
+            count=len(candidates),
+        )
         return candidate_rank_from_word_scores(
             candidates,
             word_scores,
@@ -564,19 +667,16 @@ class KeyAttenExtractor:
             if cached is not None:
                 return cached
 
-        words, resolved_pos_tags, candidates, _candidate_starts, _candidate_ends, token_counts = self._prepare_document(
+        (
+            words,
+            resolved_pos_tags,
+            candidates,
+            _candidate_starts,
+            _candidate_ends,
+            token_counts,
+        ) = self._prepare_document(
             text,
             pos_tags=pos_tags,
-        )
-        scores_by_method = attention_word_scores(
-            words,
-            self._get_model_bundle(),
-            layer_index=self._resolve_effective_layer_index(),
-            layer_indices=self.layer_indices,
-            layer_weights=self.layer_weights,
-            pos_tags=resolved_pos_tags,
-            language=self.language,
-            instruction_prefix=self._resolve_instruction_prefix(),
         )
         document = {
             "version": 1,
@@ -590,14 +690,12 @@ class KeyAttenExtractor:
                 }
                 for candidate in candidates
             ],
-            "token_counts": {str(key): float(value) for key, value in token_counts.items()},
-            "scores_by_method": {
-                method_name: np.asarray(scores, dtype=np.float32).tolist()
-                for method_name, scores in scores_by_method.items()
+            "token_counts": {
+                str(key): float(value) for key, value in token_counts.items()
             },
+            "scores_by_method": {},
+            "_cache_miss": True,
         }
-        if cache_path is not None:
-            self._write_json_cache(cache_path, document)
         return document
 
     def _tfidf_word_scores(
@@ -607,13 +705,22 @@ class KeyAttenExtractor:
         token_counts: dict[str, float],
         idf_lookup: dict[str, float],
     ) -> np.ndarray:
-        tfidf_values = {token: count * idf_lookup.get(token, 0.0) for token, count in token_counts.items()}
-        return word_scores_from_token_values(words, pos_tags, tfidf_values, language=self.language)
+        tfidf_values = {
+            token: count * idf_lookup.get(token, 0.0)
+            for token, count in token_counts.items()
+        }
+        return word_scores_from_token_values(
+            words, pos_tags, tfidf_values, language=self.language
+        )
 
-    def _require_idf_lookup(self, idf_lookup: dict[str, float] | None) -> dict[str, float]:
+    def _require_idf_lookup(
+        self, idf_lookup: dict[str, float] | None
+    ) -> dict[str, float]:
         lookup = idf_lookup if idf_lookup is not None else self.idf_lookup
         if lookup is None:
-            raise ValueError("IDF-based methods require idf_lookup or a prior fit_idf() call.")
+            raise ValueError(
+                "IDF-based methods require idf_lookup or a prior fit_idf() call."
+            )
         return lookup
 
     def _get_model_bundle(self) -> dict:
@@ -653,7 +760,9 @@ class KeyAttenExtractor:
 
         if self._bio_extractor is None:
             if not self.bio_model_path:
-                raise ValueError("bio_model_path is required for candidate_scoring='bio'.")
+                raise ValueError(
+                    "bio_model_path is required for candidate_scoring='bio'."
+                )
             self._bio_extractor = BIOExtractor(
                 checkpoint_path=self.bio_model_path, device=self.device
             )
@@ -699,7 +808,9 @@ class KeyAttenExtractor:
             "pos_tags": self._stable_cache_value(pos_tags),
             "idf_lookup": self._idf_cache_fingerprint(idf_lookup),
         }
-        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        encoded = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
         digest = hashlib.sha256(encoded).hexdigest()
         return self.cache_dir / "keyatten_keywords" / f"{digest}.json"
 
@@ -729,7 +840,9 @@ class KeyAttenExtractor:
             "text": self._stable_cache_value(text),
             "pos_tags": self._stable_cache_value(pos_tags),
         }
-        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        encoded = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
         digest = hashlib.sha256(encoded).hexdigest()
         return self.cache_dir / "keyatten_documents" / f"{digest}.json"
 
@@ -756,7 +869,9 @@ class KeyAttenExtractor:
             str(key): round(float(value), 12)
             for key, value in sorted(lookup.items(), key=lambda item: str(item[0]))
         }
-        encoded = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        encoded = json.dumps(
+            normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
     @staticmethod
@@ -768,7 +883,9 @@ class KeyAttenExtractor:
             return None
 
         keywords = payload.get("keywords") if isinstance(payload, dict) else None
-        if not isinstance(keywords, list) or not all(isinstance(keyword, str) for keyword in keywords):
+        if not isinstance(keywords, list) or not all(
+            isinstance(keyword, str) for keyword in keywords
+        ):
             return None
         return list(keywords)
 
@@ -782,14 +899,24 @@ class KeyAttenExtractor:
 
         if not isinstance(payload, dict):
             return None
-        required_keys = {"words", "pos_tags", "candidates", "token_counts", "scores_by_method"}
+        required_keys = {
+            "words",
+            "pos_tags",
+            "candidates",
+            "token_counts",
+            "scores_by_method",
+        }
         if not required_keys.issubset(payload):
             return None
-        if not isinstance(payload["words"], list) or not isinstance(payload["pos_tags"], list):
+        if not isinstance(payload["words"], list) or not isinstance(
+            payload["pos_tags"], list
+        ):
             return None
         if not isinstance(payload["candidates"], list):
             return None
-        if not isinstance(payload["token_counts"], dict) or not isinstance(payload["scores_by_method"], dict):
+        if not isinstance(payload["token_counts"], dict) or not isinstance(
+            payload["scores_by_method"], dict
+        ):
             return None
         return payload
 
@@ -812,7 +939,9 @@ class KeyAttenExtractor:
     ) -> None:
         allowed_methods = ATTENTION_METHODS if not allow_hybrid else ALL_METHODS
         if method not in allowed_methods:
-            raise ValueError(f"Unsupported method: {method}. Expected one of {allowed_methods}.")
+            raise ValueError(
+                f"Unsupported method: {method}. Expected one of {allowed_methods}."
+            )
         if method.endswith("_idf") and not allow_hybrid:
             raise ValueError(f"{method} is not supported for word-weight extraction.")
 
@@ -826,7 +955,10 @@ def extract_keywords(
     device: str = "cpu",
     backend: str = "auto",
     onnx_path: str | None = None,
-    user_dict: str | Sequence[str] | dict[str, str | tuple[int | None, str | None]] | None = None,
+    user_dict: str
+    | Sequence[str]
+    | dict[str, str | tuple[int | None, str | None]]
+    | None = None,
     idf_lookup: dict[str, float] | None = None,
     layer_index: int | None = None,
     pos_tags: Sequence[str] | None = None,

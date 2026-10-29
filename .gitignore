@@ -5,6 +5,9 @@ __pycache__/
 CLAUDE.md
 AGENTS.md
 tmp_kaguya_input.md
+/test/
+
+
 
 # Models: ignore all except LoRA adapters
 models/gte-small-zh/
@@ -41,9 +44,13 @@ test_effect.md
 
 # Copyrighted news data (not redistributable)
 data/news/
+data/paper_abstract.csv
 
 # Large raw data (>100MB, exceeds GitHub limit)
 data/shencecup/raw/all_docs.txt
+
+# Benchmark outputs
+benchmark/outputs_*/
 
 # Build artifacts
 dist/

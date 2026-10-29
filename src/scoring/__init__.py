@@ -8,6 +8,7 @@ __all__ = [
     "attention_token_scores",
     "attention_word_scores",
     "attention_word_scores_with_raw",
+    "attention_dual_layer_maps",
     "batched_attention_word_scores",
     "build_model_bundle",
     "normalize_array",
@@ -24,6 +25,7 @@ def __getattr__(name: str):
         "attention_token_scores",
         "attention_word_scores",
         "attention_word_scores_with_raw",
+        "attention_dual_layer_maps",
         "batched_attention_word_scores",
         "rescore_with_new_words",
     }:
