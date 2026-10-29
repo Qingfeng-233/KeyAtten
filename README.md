@@ -2,228 +2,57 @@
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19451584.svg)](https://doi.org/10.5281/zenodo.19451584)
 
-KeyAtten: Attention-based Keyword/Keyphrase Extraction
 [English](README.md) | [中文](README.zh-CN.md)
 
-Attention-based keyword extraction framework. Zero training, zero labeling, single forward pass. Supports Chinese and English.
-
-Evaluated on 7 public datasets against 14 methods: +67% F1@10 over traditional baselines on Chinese news, +78% over the strongest external method on English long documents.
-
-## Default Release Path
-
-- Default Chinese model: `thenlper/gte-small-zh`
-- Default release method: `received_attn`, plus `_idf` variants when a corpus is available
-- Default deployment path: small encoder + interpretable attention + lightweight operators
-
-The repository still treats `gte-small-zh` as the lightweight default production model, but the main library now ships decoder-only causal attention adaptation. When no layer is specified for a causal model, KeyAtten automatically recommends a middle-upper layer at roughly 3/4 depth instead of falling back to the last layer. For example, `Qwen/Qwen3-Embedding-0.6B` defaults to the middle-upper band around layer 21 rather than layer 27.
-
-## Method Categories
-
-The README now groups the library into three public method categories:
-
-### 1. Main Method: BIO Candidates + Fine-Tuned Attention Reranking
-
-This is the current primary route.
-
-In plain terms:
-
-- replace the default candidate set with BIO candidates
-- then use fine-tuned attention to rank them
-
-Main entrypoints:
-
-- `KeyAttenExtractor(candidate_scoring="bio")`
-- `CandidateSegmentAttentionExtractor`
-
-### 2. Standalone Methods
-
-- Attention-series methods
-- `BIOExtractor`
-- `QKLoRAExtractor`
-
-Attention-series methods include:
-
-- `cls_attn`
-- `received_attn`
-- `samrank`
-- `fusion_attn`
-- their `_idf` variants
-
-### 3. Baselines / Other Methods
-
-- used for comparison, legacy experiments, or external baselines
-
-## Features
-
-- Extracts keywords directly from pretrained model attention weights — no fine-tuning or labeling required
-- Attention-IDF hybrid strategy for significant gains on long documents and corpus-aware scenarios
-- Word-level semantic weight output (weight value, position index, POS tag)
-- Single-layer or multi-layer attention weighted fusion
-- Candidate-segment attention reranking with BIO-generated phrase candidates
-- Lightweight: 22M–33M parameter models, single forward pass
+Keyword / keyphrase extraction from Transformer attention, for Chinese and English. The base route needs no training or labels and runs in a single forward pass; trained routes (BIO candidates, LoRA reranking) are available when higher accuracy is needed.
 
 ## Installation
 
 ```bash
-pip install keyatten
+pip install "keyatten[inference,zh]"              # Chinese
+pip install "keyatten[inference,en]"              # English
+pip install "keyatten[inference,zh,lightweight]"  # Chinese + ONNX Runtime
+pip install "keyatten[full]"                      # everything
 ```
 
-Minimal install only includes `numpy` so importing the package does not pull the full ML stack by default.
+| Extra | Packages |
+|---|---|
+| `inference` | `torch`, `transformers` |
+| `lightweight` | `onnx`, `onnxruntime`, `tokenizers` |
+| `zh` | `jieba` |
+| `en` | `scikit-learn`, `nltk` |
+| `bio` | `torch`, `transformers`, `pytorch-crf` |
 
-```bash
-pip install "keyatten[inference,zh]"   # Chinese keyword extraction
-pip install "keyatten[inference,en]"   # English keyword extraction
-pip install "keyatten[inference,zh,lightweight]"  # Chinese lightweight deployment
-pip install "keyatten[full]"           # All optional dependencies
-```
-
-Optional dependency groups:
-
-- `inference`: `torch>=2.0`, `transformers>=4.30`
-- `lightweight`: `onnx>=1.16`, `onnxruntime>=1.18`, `tokenizers>=0.15`
-- `zh`: `jieba>=0.42`
-- `en`: `scikit-learn>=1.0`, `nltk>=3.8`
-
-If you call extraction APIs without the required extras installed, KeyAtten now raises a direct install hint instead of failing during `import keyatten`.
+`pip install keyatten` alone only pulls `numpy`; a missing extra raises an install hint when the API is called.
 
 ## Quick Start
-
-### Keyword Extraction
 
 ```python
 from keyatten import KeyAttenExtractor
 
 ext = KeyAttenExtractor(model="thenlper/gte-small-zh", language="zh")
 
-# Pure attention
-keywords = ext.extract_keywords(
-    "自然语言处理是人工智能的重要方向",
-    method="received_attn",
-)
-```
+ext.extract_keywords("自然语言处理是人工智能的重要方向", method="received_attn", top_k=10)
 
-### Attention-IDF Hybrid
-
-```python
-# Fit IDF from a corpus first
+# With a corpus: fit IDF, then use an _idf method
 idf = ext.fit_idf(["自然语言处理是人工智能的重要方向", "关键词提取是文本挖掘任务"])
+ext.extract_keywords("自然语言处理是人工智能的重要方向", method="fusion_attn_idf", idf_lookup=idf)
 
-keywords = ext.extract_keywords(
-    "自然语言处理是人工智能的重要方向",
-    method="fusion_attn_idf",
-    idf_lookup=idf,
-)
+ext.extract_keywords_batch(["文本一", "文本二"], method="fusion_attn")
+ext.extract_word_weights("自然语言处理是人工智能的重要方向")  # list[WordWeight(word, index, weight, pos_tag)]
 ```
 
-### Cache And Incremental IDF
+One-off call: `from keyatten import extract_keywords; extract_keywords(text, model="thenlper/gte-small-zh")`.
 
-```python
-ext = KeyAttenExtractor(
-    model="Qwen/Qwen3-Embedding-0.6B",
-    language="zh",
-    device="cuda",
-    dtype="float16",
-    cache_enabled=True,
-    cache_dir="cache",
-)
+## Extractors
 
-# fit_idf rebuilds IDF state from scratch.
-idf = ext.fit_idf(["old text one", "old text two"])
-
-# update_idf only appends document frequencies for new texts.
-idf = ext.update_idf(["new text three"])
-
-keywords = ext.extract_keywords(
-    "new text three",
-    method="fusion_attn_idf",
-    top_k=8,
-    idf_lookup=idf,
-)
-```
-
-When caching is enabled, KeyAtten writes two cache layers:
-
-- `cache/keyatten_documents/`: pre-IDF cache with tokenization, candidates, `token_counts`, and attention word scores. It can be reused when IDF changes, avoiding another model forward pass.
-- `cache/keyatten_keywords/`: post-IDF cache with final keywords for a specific IDF fingerprint. Repeated calls with the same config and IDF can return directly.
-
-### Word-Level Weights
-
-```python
-weights = ext.extract_word_weights(
-    "自然语言处理是人工智能的重要方向",
-    method="received_attn",
-)
-for w in weights:
-    print(w.word, w.weight, w.pos_tag)
-```
-
-### Batch Extraction
-
-```python
-results = ext.extract_keywords_batch(
-    ["文本一", "文本二", "文本三"],
-    method="fusion_attn",
-)
-```
-
-### External Token Input
-
-```python
-keywords = ext.extract_keywords(
-    ["空天信息", "系统", "优化"],
-    pos_tags=["n", "n", "v"],
-    method="received_attn",
-)
-```
-
-### Domain Dictionary
-
-```python
-ext = KeyAttenExtractor(
-    model="thenlper/gte-small-zh",
-    language="zh",
-    user_dict=["空天信息", "星闪技术"],
-)
-
-keywords = ext.extract_keywords(
-    "空天信息系统优化方法",
-    method="received_attn",
-)
-```
-
-### Token-Span Candidate Scoring
-
-```python
-ext = KeyAttenExtractor(
-    model="Qwen/Qwen3-Embedding-0.6B",
-    language="zh",
-    candidate_scoring="token_span",
-)
-
-keywords = ext.extract_keywords(
-    "水木年华被嘲讽已过气，卢庚戌回应称作品会留下来",
-    method="fusion_attn_idf",
-    idf_lookup=idf,
-)
-```
-
-### BIO Candidates Instead of Jieba Candidates
-
-```python
-ext = KeyAttenExtractor(
-    model="Qwen/Qwen3-Embedding-0.6B",
-    language="zh",
-    candidate_scoring="bio",
-    bio_model_path="models/bio_ckipbert_extractive_ep13/bio_model_full.pt",
-)
-
-keywords = ext.extract_keywords(
-    "水木年华被嘲讽已过气，卢庚戌回应称作品会留下来",
-    method="received_attn",
-)
-```
-
-### Candidate-Segment Attention Reranking
+| Extractor | Needs trained weights | Use when |
+|---|:---:|---|
+| `KeyAttenExtractor` | No | Default; zero-shot attention scoring |
+| `KeyAttenExtractor(candidate_scoring="bio")` | BIO checkpoint | Better Chinese candidates than jieba |
+| `CandidateSegmentAttentionExtractor` | BIO checkpoint + LoRA adapter | Main method, best Chinese accuracy |
+| `QKLoRAExtractor` | LoRA adapter | Standalone Q·K scoring |
+| `BIOExtractor` | BIO checkpoint | Span extraction only (`extract_spans`) |
 
 ```python
 from keyatten import CandidateSegmentAttentionExtractor
@@ -232,151 +61,69 @@ ext = CandidateSegmentAttentionExtractor(
     model="Qwen/Qwen3-Embedding-0.6B",
     adapter_path="models/candidate_segment_attn/qwen06_v2_2k_len1024_c30/best_adapter",
     bio_model_path="models/bio_ckipbert_extractive_ep13/bio_model_full.pt",
-    max_candidates=30,
 )
-
-keywords = ext.extract_keywords(
-    "水木年华被嘲讽已过气，卢庚戌回应称作品会留下来",
-    random_seeds=[1, 2, 3],
-)
+ext.extract_keywords("水木年华被嘲讽已过气，卢庚戌回应称作品会留下来", random_seeds=[1, 2, 3])
 ```
 
-### Convenience Function
+With `candidate_order="random"` (default), multiple `random_seeds` reduce sensitivity to candidate order.
+
+## Attention Methods
+
+| Method | Score |
+|---|---|
+| `received_attn` | Total attention a token receives — recommended default |
+| `cls_attn` | Attention from `[CLS]`; favors distinctive entities (tag clouds) |
+| `samrank` | SAMRank formula ([Kang & Shin, 2023](https://doi.org/10.18653/v1/2023.emnlp-main.630)) |
+| `fusion_attn` | Normalized product of `cls_attn` and `received_attn` |
+| `voted_attn` | Received attention, content-masked and position-normalized |
+| `excess_attn` | Attention above a uniform baseline, excluding attention sinks |
+
+Every method has an `_idf` variant (e.g. `received_attn_idf`) that multiplies by TF-IDF; prefer it whenever a corpus is available. `fit_idf()` rebuilds IDF state, `update_idf()` adds new documents incrementally.
+
+## KeyAttenExtractor Options
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `model` | required | HF model name or local path |
+| `language` | `"zh"` | `"zh"` / `"en"` |
+| `device` | `"cpu"` | Compute device |
+| `backend` | `"auto"` | `"torch"` / `"onnx"`; `auto` picks ONNX when an `.onnx` file is found |
+| `onnx_path` | `None` | Exported attention ONNX file |
+| `dtype` | `"auto"` | `"float32"` / `"float16"` / `"bfloat16"` |
+| `layer_index` | `None` | Single layer; `None` = last layer for encoders, ~3/4 depth for decoder-only models |
+| `layer_indices`, `layer_weights` | `None` | Weighted multi-layer fusion |
+| `instruction_prefix` | `None` | Prefix for causal models (Chinese default `核心关键词、关键实体、主题：`) |
+| `is_causal_override` | `None` | Force decoder (`True`) or encoder (`False`) readout |
+| `user_dict` | `None` | Domain terms: file path, list, or `{term: tag}` / `{term: (freq, tag)}` |
+| `candidate_scoring` | `"word"` | `"word"` / `"token_span"` (score candidate char spans) / `"bio"` (needs `bio_model_path`) |
+| `dedup_nested_for_topk5` | `False` | Drop nested duplicates when `top_k <= 5` |
+| `cache_enabled`, `cache_dir` | `False`, `"cache"` | Disk cache of attention scores (reused across IDF changes) and final keywords |
+
+`extract_keywords` also accepts pre-tokenized input: `ext.extract_keywords(["空天信息", "系统", "优化"], pos_tags=["n", "n", "v"])`. `token_span` and `bio` apply only to raw string input.
+
+## Models and Deployment
+
+| Use | Model |
+|---|---|
+| Chinese, lightweight (~33M) | `thenlper/gte-small-zh` |
+| English, lightweight (~22M) | `sentence-transformers/all-MiniLM-L6-v2` |
+| Chinese, decoder-only | `Qwen/Qwen3-Embedding-0.6B` + `fusion_attn_idf` |
+
+ONNX Runtime without torch (`pip install "keyatten[zh,lightweight]"`):
 
 ```python
-from keyatten import extract_keywords
-
-keywords = extract_keywords(
-    "自然语言处理是人工智能的重要方向",
-    model="thenlper/gte-small-zh",
-)
-```
-
-## Attention-Series Methods
-
-| Method | Description |
-|--------|-------------|
-| `cls_attn` | Attention weights from [CLS] token to each token |
-| `received_attn` | Total attention each token receives from all tokens |
-| `samrank` | SAMRank formula (global attention + proportional redistribution) |
-| `fusion_attn` | Normalized product of CLS and received attention |
-
-Each method has a corresponding `_idf` hybrid variant (e.g., `cls_attn_idf`) that multiplies attention scores with TF-IDF, suitable for corpus-aware scenarios.
-
-> The `samrank` formula is referenced from [Kang & Shin (2023, EMNLP)](https://doi.org/10.18653/v1/2023.emnlp-main.630). The other methods (`cls_attn`, `received_attn`, `fusion_attn`) and all `_idf` hybrid strategies are original to this project.
-
-### Using Attention as a Secondary Method
-
-`received_attn` is now the safest default starting point. When a corpus is available, `_idf` variants should be tried first; in the latest Chinese decoder-only rollup, `received_attn_idf` is the main CSL path and `fusion_attn_idf` is the main ShenCeCup path. `cls_attn` is still useful for high-distinctiveness tag-cloud style outputs, but it is no longer the default keyword-extraction method.
-
-If your main metric is `F1@5`, the library now also exposes an optional nested-phrase de-dup post-ranking step. It only activates when `top_k <= 5`, filters substring/superstring duplicates such as `natural language processing / natural language / language processing`, and stays off by default so the `@10` path is unchanged.
-
-For raw string input, the library now also exposes an optional `candidate_scoring="token_span"` route. Candidate generation still follows the segmenter and POS filter, but ranking aggregates token attention directly over each candidate's character span, bypassing the previous word-level mean-of-means path.
-
-For Chinese raw string input, the library also exposes `candidate_scoring="bio"`. This replaces the default jieba/POS candidate generator with `BIOExtractor` candidates first, then scores those BIO candidates with attention.
-
-For trained Chinese reranking, the library also exposes `CandidateSegmentAttentionExtractor`. This route uses `BIOExtractor` only for candidate generation, then reranks the explicit candidate list with attention over the full `document + candidate segment` input. If you use random candidate order, prefer multi-seed inference such as `random_seeds=[1, 2, 3]` to reduce order sensitivity.
-
-## Practical Examples
-
-Side-by-side comparison of `cls_attn` vs `samrank` across domains (model: `gte-small-zh`, top_k=6):
-
-| Domain | Input (excerpt) | cls_attn | samrank |
-|--------|----------------|----------|---------|
-| Tech | OpenAI released GPT-4o with multimodal input... | OpenAI, GPT, model | OpenAI, model, GPT |
-| Medical | mRNA vaccine encodes spike protein... Omicron variant... | mRNA, mRNA vaccine, COVID, **Omicron variant** | mRNA, mRNA vaccine, COVID, COVID virus |
-| Finance | Fed announces 25bp rate hike... | rate hike, basis points, **global stocks**, rate | rate hike, basis points, rate, global stocks |
-| Sports | Messi scores hat-trick in World Cup final... lifts trophy | **Messi**, trophy, hat-trick, **final** | trophy, Messi, hat-trick, **penalty** |
-| History | Qin Shi Huang unified six states... centralized dynasty | centralization, feudal dynasty, standardization | centralization, standardization, feudal dynasty |
-| Daily | Meet at Starbucks at 3pm... business trip to Beijing | **Starbucks**, Beijing, business trip | **meet**, Beijing, **chat** |
-
-`cls_attn` favors the most distinctive entities (Messi, Starbucks, Omicron), ideal for tag clouds and summary displays. `samrank` provides broader coverage, better suited for retrieval and evaluation scenarios.
-
-## Recommended Models
-
-| Language | Model | Parameters |
-|----------|-------|------------|
-| Chinese | `thenlper/gte-small-zh` | ~33M |
-| English | `sentence-transformers/all-MiniLM-L6-v2` | ~22M |
-
-## Decoder-Only Support
-
-The main library now includes the stable decoder-only gains:
-
-- automatic causal model detection
-- default Chinese causal prefix `核心关键词、关键实体、主题：`
-- automatic middle-upper layer recommendation when `layer_index` is omitted, using a band at roughly 3/4 depth for causal models
-- current recommended Chinese decoder-only combination: `Qwen/Qwen3-Embedding-0.6B + fusion_attn_idf`
-
-Latest rollout details are documented in the project's internal experiment notes under `docs/`.
-
-## Lightweight Deployment
-
-The recommended lightweight deployment path is `gte-small-zh + ONNX Runtime`. Internal validation shows that `gte-small-zh` can export token attention and reproduce `received_attn` word scores with stable numerical agreement, making it the default route for lightweight operators and deployment work.
-
-Recommended install:
-
-```bash
-pip install "keyatten[zh,lightweight]"
-```
-
-Lightweight backend example:
-
-```python
-from keyatten import KeyAttenExtractor
-
 ext = KeyAttenExtractor(
-    model="/path/to/thenlper__gte-small-zh",
-    language="zh",
+    model="/path/to/gte-small-zh",        # local dir containing tokenizer.json
     backend="onnx",
-    onnx_path="/path/to/attention_last.onnx",
-)
-
-keywords = ext.extract_keywords(
-    "自然语言处理用于关键词提取与文本分析",
-    method="received_attn",
+    onnx_path="/path/to/attention_last.onnx",  # single exported attention layer
 )
 ```
 
-Notes:
+Export the ONNX file with [gte_onnx_probe.py](./benchmark/tools/gte_onnx_probe.py) (needs `inference` too).
 
-- `model` should point to a local `gte-small-zh` directory so KeyAtten can read `tokenizer.json`
-- `onnx_path` should point to the exported attention ONNX file
-- the lightweight backend currently supports a single exported attention layer, which matches the default `gte-small-zh` release path
-- if you want to export the ONNX file yourself, install `keyatten[inference,zh,lightweight]` instead
+## Evaluation
 
-See:
-
-- [gte_onnx_probe.py](./benchmark/tools/gte_onnx_probe.py)
-
-## Benchmark Entry
-
-Use one professional entrypoint instead of browsing scripts under `benchmark/`:
-
-```bash
-python -m keyatten.benchmark_cli --help
-python -m keyatten.benchmark_cli keyword --root-dir "." --output-dir "outputs_smoke" --datasets csl_test --models thenlper/gte-small-zh --skip-yake --device cpu
-```
-
-After editable install, you can use:
-
-```bash
-keyatten-benchmark --help
-keyatten-benchmark gte-onnx-probe
-```
-
-Main command mapping:
-
-- `keyword` -> `benchmark/eval/run_keyword_benchmark.py`
-- `hidden-head` -> `benchmark/eval/run_hidden_head_benchmark.py`
-- `gte-onnx-probe` -> `benchmark/tools/gte_onnx_probe.py`
-- `llm-keyword` -> `benchmark/eval/llm_keyword_benchmark.py`
-
-Full benchmark usage notes: [benchmark/README.md](./benchmark/README.md)
-
-## Evaluation Summary
-
-Compared against TF-IDF, TextRank, KeyBERT and 14 methods total on 7 public datasets (F1@10):
+F1@10 on 7 public datasets, against 14 methods including TF-IDF, TextRank and KeyBERT:
 
 | Scenario | KeyAtten Best | Method | vs Strongest Traditional | vs Strongest External |
 |----------|:---:|--------|:---:|:---:|
@@ -388,70 +135,12 @@ Compared against TF-IDF, TextRank, KeyBERT and 14 methods total on 7 public data
 | English Long-doc (Krapivin2009-fulltext) | **0.1268** | `cls_attn_idf` | — | +79% |
 | English Short-doc (3 datasets) | 0.1370 | `fusion_attn` | — | On par |
 
-The **main method** (BIO candidates + fine-tuned Candidate-Segment Attention reranking) achieves F1@10 = 0.4665 on news55, a +13.7% improvement over BIO-only clean baseline (0.3916).
+The main method (`CandidateSegmentAttentionExtractor`) reaches F1@10 = 0.4665 on news55, +13.7% over the BIO-only clean baseline (0.3916).
 
-Full evaluation report: [EVALUATION-PUBLIC.md](./EVALUATION-PUBLIC.md)
-
-## API
-
-### KeyAttenExtractor
-
-```python
-KeyAttenExtractor(
-    model: str,                         # Hugging Face model name
-    language: str = "zh",               # "zh" or "en"
-    device: str = "cpu",                # compute device
-    backend: str = "auto",              # "auto" / "torch" / "onnx"
-    onnx_path: str | None = None,       # ONNX attention file path
-    user_dict: str | list[str] | dict = None,  # domain dictionary path / term list / term config
-    layer_index: int | None = None,     # None = auto; causal models default to the middle-upper band at roughly 3/4 depth, -1 = explicit last layer
-    layer_indices: list[int] = None,    # multi-layer indices
-    layer_weights: list[float] = None,  # multi-layer weights
-    instruction_prefix: str | None = None,  # optional prefix for causal models
-    is_causal_override: bool | None = None,  # None=auto detect; False=force encoder-style readout; True=force decoder-style readout
-    dedup_nested_for_topk5: bool = False,    # enable substring de-dup post-processing only when top_k<=5
-    candidate_scoring: str = "word",   # "word" / "token_span" / "bio"
-    cache_enabled: bool = False,       # enable disk cache
-    cache_dir: str | Path = "cache",   # cache directory
-)
-```
-
-| Method | Returns |
-|--------|---------|
-| `extract_keywords(text, method, top_k, idf_lookup)` | `list[str]` |
-| `extract_keywords_batch(texts, method, top_k, idf_lookup)` | `list[list[str]]` |
-| `extract_word_weights(text, method)` | `list[WordWeight]` |
-| `fit_idf(texts)` | `dict[str, float]` |
-| `update_idf(texts)` | `dict[str, float]` |
-
-`WordWeight` fields: `word`, `index`, `weight`, `pos_tag`.
-
-Notes:
-
-- `extract_keywords` and `extract_word_weights` also accept pre-tokenized `list[str]`
-- when external tokens are provided, `pos_tags` is optional; Chinese defaults to `n`, English defaults to `eng`
-- `user_dict` accepts a dictionary file path, a term list, or mappings like `{term: tag}` / `{term: (freq, tag)}`
-- `extract_keywords()` and `extract_keywords_batch()` now default to `received_attn`
-- if `layer_index` is omitted for a causal model, KeyAtten automatically uses the recommended middle-upper layer at roughly 3/4 depth
-- `is_causal_override` only overrides the attention readout mode; it does not change the underlying model architecture
-- when `dedup_nested_for_topk5=True`, substring/superstring de-dup is applied only for `top_k<=5`, not for `@10`
-- `candidate_scoring="token_span"` only applies to raw string input; external token input stays on the word-based ranking path
-- `candidate_scoring="bio"` requires `bio_model_path` and only applies to raw string input
-- `fit_idf()` rebuilds IDF state; `update_idf()` incrementally appends new documents to the current state
-- when `cache_enabled=True`, the word candidate path caches both pre-IDF document scores and post-IDF final keywords
+Full report: [EVALUATION-PUBLIC.md](./EVALUATION-PUBLIC.md). Reproduce from a source checkout with `python -m benchmark.main --help` ([benchmark/README.md](./benchmark/README.md)).
 
 ## Citation
 
-The `samrank` method in this project references the ranking formula from:
+`samrank` follows Kang, B., & Shin, H. (2023). *SAMRank: Unsupervised Keyphrase Extraction using Self-Attention Map in BERT and GPT-2.* EMNLP 2023. [DOI](https://doi.org/10.18653/v1/2023.emnlp-main.630). All other methods and the `_idf` hybrids are original to this project.
 
-> Kang, B., & Shin, H. (2023). *SAMRank: Unsupervised Keyphrase Extraction using Self-Attention Map in BERT and GPT-2.* EMNLP 2023. [DOI: 10.18653/v1/2023.emnlp-main.630](https://doi.org/10.18653/v1/2023.emnlp-main.630)
-
-`cls_attn`, `received_attn`, `fusion_attn` and all `_idf` hybrid strategies are original to this project.
-
-## Acknowledgments
-
-Thanks to the [LinuxDo](https://linux.do) community for their support.
-
-## License
-
-[MIT](./LICENSE)
+Thanks to the [LinuxDo](https://linux.do) community. License: [MIT](./LICENSE).
