@@ -24,6 +24,7 @@ from typing import List, Sequence, Tuple
 import numpy as np
 
 from ..scoring import DEFAULT_ZH_CAUSAL_INSTRUCTION_PREFIX
+from ..scoring.model_bundle import _detect_attention_layer_count, _recommended_decoder_layer_index
 from ..candidates.consolidation import ScoredCandidate
 from ..candidates import (
     build_candidates,
@@ -33,26 +34,14 @@ from ..candidates import (
     segment_text,
 )
 
-try:
-    import torch
-except ImportError:
-    torch = None
-
-try:
-    from transformers import AutoModel, AutoTokenizer
-except ImportError:
-    AutoModel = None
-    AutoTokenizer = None
+from ._hf_loading import AutoModel, load_adapter, load_tokenizer, require_torch, resolve_amp_dtype, torch
 
 
 # ── Dependency checks ─────────────────────────────────────────────────
 
 
 def _require_torch() -> None:
-    if torch is None:
-        raise ImportError("torch is required for QK LoRA. Install with: pip install torch>=2.0")
-    if AutoModel is None:
-        raise ImportError("transformers is required for QK LoRA. Install with: pip install transformers>=4.30")
+    require_torch("QK LoRA")
 
 
 # ── Model introspection helpers ───────────────────────────────────────
@@ -109,20 +98,9 @@ def _supported_qk_layer_indices(model) -> List[int]:
     ]
 
 
-def _recommended_layer_index(layer_count: int | None) -> int | None:
-    if layer_count is None or layer_count <= 0:
-        return None
-    return min(layer_count - 1, max(0, int(layer_count * 0.75)))
-
-
 def _resolve_layer_arg(layer_arg: str, model) -> Tuple[int, int | None]:
     """Resolve a layer argument ('auto' or integer) to a concrete layer index."""
-    layer_count = None
-    for attr_name in ("num_hidden_layers", "n_layer", "num_layers", "n_layers"):
-        value = getattr(model.config, attr_name, None)
-        if isinstance(value, int) and value > 0:
-            layer_count = value
-            break
+    layer_count = _detect_attention_layer_count(model.config)
 
     supported_qk_layers = _supported_qk_layer_indices(model)
 
@@ -133,7 +111,7 @@ def _resolve_layer_arg(layer_arg: str, model) -> Tuple[int, int | None]:
 
     if layer_arg.strip().lower() == "auto":
         if supported_qk_layers:
-            raw_recommended = _recommended_layer_index(
+            raw_recommended = _recommended_decoder_layer_index(
                 layer_count if layer_count is not None else len(supported_qk_layers)
             )
             if raw_recommended is None:
@@ -143,7 +121,7 @@ def _resolve_layer_arg(layer_arg: str, model) -> Tuple[int, int | None]:
                 key=lambda idx: (abs(idx - raw_recommended), -idx),
             )
             return recommended, layer_count
-        recommended = _recommended_layer_index(layer_count)
+        recommended = _recommended_decoder_layer_index(layer_count)
         if recommended is None:
             if layer_count is None:
                 return -1, None
@@ -355,23 +333,8 @@ class QKLoRAExtractor:
         if self._model is not None:
             return
 
-        amp_dtype = None
-        if self.dtype == "auto":
-            if self.device == "cuda" and torch.cuda.is_available() and torch.cuda.is_bf16_supported():
-                amp_dtype = torch.bfloat16
-        elif self.dtype == "bfloat16":
-            amp_dtype = torch.bfloat16
-        elif self.dtype == "float16":
-            amp_dtype = torch.float16
-
-        try:
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                self.model_name, use_fast=True, trust_remote_code=True,
-            )
-        except Exception:
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                self.model_name, use_fast=False, trust_remote_code=True,
-            )
+        amp_dtype = resolve_amp_dtype(self.dtype, self.device)
+        self._tokenizer = load_tokenizer(self.model_name)
 
         base_model = AutoModel.from_pretrained(
             self.model_name,
@@ -380,16 +343,7 @@ class QKLoRAExtractor:
         )
 
         self._layer_idx, _layer_count = _resolve_layer_arg(self.layer_arg, base_model)
-
-        if self.adapter_path is not None:
-            try:
-                from peft import PeftModel
-            except ImportError:
-                raise ImportError(
-                    "peft is required to load LoRA adapters. "
-                    "Install with: pip install peft>=0.10.0"
-                )
-            base_model = PeftModel.from_pretrained(base_model, self.adapter_path)
+        base_model = load_adapter(base_model, self.adapter_path)
 
         base_model.to(self.device)
         base_model.eval()

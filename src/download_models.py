@@ -85,20 +85,8 @@ def parse_args() -> argparse.Namespace:
 
 # ── Download helpers ──────────────────────────────────────────────────
 
-def _download_file_hf(repo_id: str, filename: str, dest: Path, timeout: int) -> bool:
-    url = f"https://huggingface.co/{repo_id}/resolve/main/{filename}"
-    resp = requests.get(url, headers=HF_HEADERS, timeout=timeout, stream=True)
-    resp.raise_for_status()
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    with open(dest, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=8192):
-            f.write(chunk)
-    return True
-
-
-def _download_file_modelscope(repo_id: str, filename: str, dest: Path, timeout: int) -> bool:
-    url = f"{MODELSCOPE_BASE_URL}/models/{repo_id}/repo/download"
-    params = {"revision": "master", "filepath": filename}
+def _stream_to_file(url: str, dest: Path, timeout: int, params: dict | None = None) -> bool:
+    """流式下载 url 到 dest，HTTP 错误时抛异常。"""
     resp = requests.get(url, headers=HF_HEADERS, params=params, timeout=timeout, stream=True)
     resp.raise_for_status()
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -106,6 +94,17 @@ def _download_file_modelscope(repo_id: str, filename: str, dest: Path, timeout: 
         for chunk in resp.iter_content(chunk_size=8192):
             f.write(chunk)
     return True
+
+
+def _download_file_hf(repo_id: str, filename: str, dest: Path, timeout: int) -> bool:
+    url = f"https://huggingface.co/{repo_id}/resolve/main/{filename}"
+    return _stream_to_file(url, dest, timeout)
+
+
+def _download_file_modelscope(repo_id: str, filename: str, dest: Path, timeout: int) -> bool:
+    url = f"{MODELSCOPE_BASE_URL}/models/{repo_id}/repo/download"
+    params = {"revision": "master", "filepath": filename}
+    return _stream_to_file(url, dest, timeout, params=params)
 
 
 def _check_files(model_dir: Path, files: list[str]) -> list[str]:
@@ -149,8 +148,7 @@ def _download_model(
 def _copy_tokenizer_to_onnx(onnx_dir: Path, pytorch_dir: Path) -> list[str]:
     """Copy tokenizer files from PyTorch model dir to ONNX model dir."""
     copied = []
-    for f in ["config.json", "tokenizer.json", "tokenizer_config.json",
-              "vocab.txt", "special_tokens_map.json"]:
+    for f in MODEL_REGISTRY["gte-small-zh-onnx"]["tokenizer_files"]:
         src = pytorch_dir / f
         if src.exists() and not (onnx_dir / f).exists():
             onnx_dir.mkdir(parents=True, exist_ok=True)

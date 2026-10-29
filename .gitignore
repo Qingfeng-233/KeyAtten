@@ -51,6 +51,12 @@ data/shencecup/raw/all_docs.txt
 
 # Benchmark outputs
 benchmark/outputs_*/
+outputs/
+
+# Local keyword caches and scratch files
+cache/
+cache_*/
+testtxt.txt
 
 # Build artifacts
 dist/

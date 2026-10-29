@@ -16,17 +16,7 @@ from __future__ import annotations
 import random
 from typing import Any, List, Sequence
 
-try:
-    import torch
-except ImportError:
-    torch = None
-
-try:
-    from transformers import AutoModel, AutoTokenizer
-except ImportError:
-    AutoModel = None
-    AutoTokenizer = None
-
+from ._hf_loading import AutoModel, load_adapter, load_tokenizer, require_torch, resolve_amp_dtype, torch
 from .bio import BIOExtractor
 from .qk_lora import _resolve_layer_arg
 
@@ -35,16 +25,7 @@ DEFAULT_SEGMENT_INSTRUCTION = "为这篇文章选择最重要的关键词。"
 
 
 def _require_torch() -> None:
-    if torch is None:
-        raise ImportError(
-            "torch is required for CandidateSegmentAttentionExtractor. "
-            "Install with: pip install torch>=2.0"
-        )
-    if AutoModel is None or AutoTokenizer is None:
-        raise ImportError(
-            "transformers is required for CandidateSegmentAttentionExtractor. "
-            "Install with: pip install transformers>=4.30"
-        )
+    require_torch("CandidateSegmentAttentionExtractor")
 
 
 def _candidate_token_scores(
@@ -169,29 +150,10 @@ class CandidateSegmentAttentionExtractor:
         if self._model is not None:
             return
 
-        amp_dtype = None
-        if self.dtype == "auto":
-            if self.device == "cuda" and torch.cuda.is_available() and torch.cuda.is_bf16_supported():
-                amp_dtype = torch.bfloat16
-        elif self.dtype == "bfloat16":
-            amp_dtype = torch.bfloat16
-        elif self.dtype == "float16":
-            amp_dtype = torch.float16
-        elif self.dtype != "float32":
+        if self.dtype not in {"auto", "float32", "float16", "bfloat16"}:
             raise ValueError("dtype must be one of {'auto', 'float32', 'float16', 'bfloat16'}.")
-
-        try:
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                self.model_name,
-                use_fast=True,
-                trust_remote_code=True,
-            )
-        except Exception:
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                self.model_name,
-                use_fast=False,
-                trust_remote_code=True,
-            )
+        amp_dtype = resolve_amp_dtype(self.dtype, self.device)
+        self._tokenizer = load_tokenizer(self.model_name)
         if self._tokenizer.pad_token_id is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token or self._tokenizer.unk_token
 
@@ -202,16 +164,7 @@ class CandidateSegmentAttentionExtractor:
             attn_implementation="eager",
         )
         self._layer_idx, _ = _resolve_layer_arg(self.layer_arg, base_model)
-
-        if self.adapter_path is not None:
-            try:
-                from peft import PeftModel
-            except ImportError:
-                raise ImportError(
-                    "peft is required to load LoRA adapters. "
-                    "Install with: pip install peft>=0.10.0"
-                )
-            base_model = PeftModel.from_pretrained(base_model, self.adapter_path)
+        base_model = load_adapter(base_model, self.adapter_path)
 
         base_model.to(self.device)
         base_model.eval()

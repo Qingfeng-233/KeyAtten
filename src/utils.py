@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import math
 import re
+
+import numpy as np
 
 try:
     from nltk.stem import PorterStemmer
@@ -28,4 +31,14 @@ def normalize_phrase(text: str) -> str:
     return "".join(tokens)
 
 
-__all__ = ["normalize_phrase"]
+def normalize_array(values: np.ndarray) -> np.ndarray:
+    if values.size == 0:
+        return values
+    min_value = float(values.min())
+    max_value = float(values.max())
+    if math.isclose(min_value, max_value):
+        return np.zeros_like(values)
+    return (values - min_value) / (max_value - min_value)
+
+
+__all__ = ["normalize_array", "normalize_phrase"]

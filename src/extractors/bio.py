@@ -121,12 +121,17 @@ def _is_clean_span_candidate(text: str) -> bool:
     return True
 
 
+def _normalize_clean_span(text: str) -> str:
+    """清洗 span 文本并剥掉首尾虚词/标点，剥完再清洗一次。"""
+    cleaned = _clean_span_text(text)
+    cleaned = _strip_clean_span_edges(cleaned)
+    return _clean_span_text(cleaned)
+
+
 def _postprocess_clean_spans(spans: list[tuple[str, float]]) -> list[tuple[str, float]]:
     dedup: dict[str, float] = {}
     for text, score in spans:
-        cleaned = _clean_span_text(text)
-        cleaned = _strip_clean_span_edges(cleaned)
-        cleaned = _clean_span_text(cleaned)
+        cleaned = _normalize_clean_span(text)
         if not _is_clean_span_candidate(cleaned):
             continue
         previous = dedup.get(cleaned)
@@ -152,9 +157,7 @@ def _merge_recall_phrases(
     for rank, phrase in enumerate(
         mine_recall_oriented_phrases(text, language="zh", max_phrases=phrase_limit)
     ):
-        cleaned = _clean_span_text(phrase)
-        cleaned = _strip_clean_span_edges(cleaned)
-        cleaned = _clean_span_text(cleaned)
+        cleaned = _normalize_clean_span(phrase)
         if not _is_clean_span_candidate(cleaned) or cleaned not in text:
             continue
         score = base_score - rank * 1e-4

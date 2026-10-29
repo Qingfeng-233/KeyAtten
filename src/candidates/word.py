@@ -8,7 +8,7 @@ from typing import Mapping, Sequence
 
 import numpy as np
 
-from ..utils import normalize_phrase
+from ..utils import normalize_array, normalize_phrase
 
 
 VALID_POS_PREFIXES = ("n", "eng", "v")
@@ -334,16 +334,6 @@ def token_values_from_word_values(
     return token_values
 
 
-def _normalize_score_array(values: np.ndarray) -> np.ndarray:
-    if values.size == 0:
-        return values
-    min_value = float(values.min())
-    max_value = float(values.max())
-    if math.isclose(min_value, max_value):
-        return np.zeros_like(values)
-    return (values - min_value) / (max_value - min_value)
-
-
 def char_scores_from_tokens(
     token_offsets: Sequence[tuple[int, int]],
     token_scores: Sequence[float],
@@ -366,7 +356,7 @@ def char_scores_from_tokens(
         char_scores[start:end] = np.maximum(char_scores[start:end], float(score_array[token_index]))
 
     if normalize:
-        return _normalize_score_array(char_scores)
+        return normalize_array(char_scores)
     return char_scores
 
 
@@ -386,8 +376,8 @@ def fuse_char_scores(
         raise ValueError("primary_scores and secondary_scores must have the same shape.")
 
     if normalize_inputs:
-        primary = _normalize_score_array(primary)
-        secondary = _normalize_score_array(secondary)
+        primary = normalize_array(primary)
+        secondary = normalize_array(secondary)
     return alpha * primary + (1.0 - alpha) * secondary
 
 

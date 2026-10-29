@@ -134,41 +134,32 @@ def _select_ort_providers(device: str) -> list[str]:
     return ["CPUExecutionProvider"]
 
 
+def _config_value(config, key: str, default=None):
+    """从 HF config 对象或 config.json 解析出的 dict 中读取字段。"""
+    if isinstance(config, dict):
+        return config.get(key, default)
+    return getattr(config, key, default)
+
+
+def _load_config_json(config_path: Path) -> dict:
+    """读取磁盘上的 config.json；文件不存在时返回空 dict。"""
+    if not config_path.is_file():
+        return {}
+    with config_path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
 def _detect_is_causal(config) -> bool:
     """Detect whether a model uses causal (decoder-only) attention from its config."""
-    if getattr(config, "is_decoder", False):
+    if _config_value(config, "is_decoder", False):
         return True
-    architectures = getattr(config, "architectures", None) or []
-    return any("CausalLM" in arch for arch in architectures)
-
-
-def _detect_is_causal_from_json(config_path: Path) -> bool:
-    """Detect causal model from a config.json file on disk."""
-    if not config_path.is_file():
-        return False
-    with config_path.open("r", encoding="utf-8") as handle:
-        config = json.load(handle)
-    if config.get("is_decoder", False):
-        return True
-    architectures = config.get("architectures", [])
+    architectures = _config_value(config, "architectures") or []
     return any("CausalLM" in arch for arch in architectures)
 
 
 def _detect_attention_layer_count(config) -> int | None:
     for attr_name in ("num_hidden_layers", "n_layer", "num_layers", "n_layers"):
-        value = getattr(config, attr_name, None)
-        if isinstance(value, int) and value > 0:
-            return value
-    return None
-
-
-def _detect_attention_layer_count_from_json(config_path: Path) -> int | None:
-    if not config_path.is_file():
-        return None
-    with config_path.open("r", encoding="utf-8") as handle:
-        config = json.load(handle)
-    for key in ("num_hidden_layers", "n_layer", "num_layers", "n_layers"):
-        value = config.get(key)
+        value = _config_value(config, attr_name)
         if isinstance(value, int) and value > 0:
             return value
     return None
@@ -219,10 +210,10 @@ def build_model_bundle(
         model_dir, resolved_onnx = _resolve_onnx_artifacts(model_name, onnx_path, layer_index)
         tokenizer, max_length = _load_tokenizer_metadata(model_dir)
         session = ort.InferenceSession(str(resolved_onnx), providers=_select_ort_providers(device))
-        config_path = model_dir / "config.json"
-        detected_is_causal = _detect_is_causal_from_json(config_path)
+        config = _load_config_json(model_dir / "config.json")
+        detected_is_causal = _detect_is_causal(config)
         is_causal = detected_is_causal if is_causal_override is None else is_causal_override
-        attention_layer_count = _detect_attention_layer_count_from_json(config_path)
+        attention_layer_count = _detect_attention_layer_count(config)
         return {
             "backend": "onnx",
             "tokenizer": tokenizer,

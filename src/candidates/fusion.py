@@ -6,9 +6,8 @@ from typing import Iterable, Sequence
 
 import numpy as np
 
-from ..scoring.utils import normalize_array
 from .word import is_valid_english_token, is_valid_token
-from ..utils import normalize_phrase
+from ..utils import normalize_array, normalize_phrase
 
 
 def token_counter(words: Sequence[str], pos_tags: Sequence[str], language: str = "zh") -> Counter[str]:

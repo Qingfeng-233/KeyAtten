@@ -180,13 +180,7 @@ def spans_to_text(
 ) -> list[str]:
     keywords: list[str] = []
     for span_start, span_end in spans:
-        if span_start >= len(offsets) or span_end > len(offsets):
-            continue
-        char_start = offsets[span_start][0]
-        char_end = offsets[span_end - 1][1]
-        if char_end <= char_start:
-            continue
-        keyword = text[char_start:char_end].strip()
+        keyword = _span_to_keyword(text, offsets, span_start, span_end)
         if keyword:
             keywords.append(keyword)
     return keywords
